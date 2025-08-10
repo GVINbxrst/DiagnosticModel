@@ -1,0 +1,962 @@
+"""
+Модуль прогнозирования временных рядов для диагностики двигателей
+
+Этот модуль анализирует тренды RMS токов по фазам и выполняет прогнозирование:
+- Построение временных рядов RMS для каждой фазы
+- Использование ARIMA и Prophet для прогнозирования
+- Расчет вероятности превышения порогов (аномалии)
+- Работа без меток отказов (unsupervised подход)
+"""
+
+import warnings
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Union
+from uuid import UUID
+
+import numpy as np
+import pandas as pd
+from prophet import Prophet
+from sklearn.preprocessing import StandardScaler
+from sqlalchemy import select, and_
+from sqlalchemy.ext.asyncio import AsyncSession
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller
+
+from src.config.settings import get_settings
+from src.database.connection import get_async_session
+from src.database.models import Feature, Equipment, RawSignal
+from src.utils.logger import get_logger
+
+# Настройки
+settings = get_settings()
+logger = get_logger(__name__)
+
+# Константы
+DEFAULT_FORECAST_STEPS = 24  # Прогноз на 24 шага вперед
+DEFAULT_ANOMALY_THRESHOLD = 1.5  # Порог аномалии (в стандартных отклонениях)
+MIN_OBSERVATIONS = 50  # Минимальное количество наблюдений для прогноза
+SEASONALITY_PERIOD = 24  # Период сезонности (24 часа)
+
+
+class ForecastingError(Exception):
+    """Базовое исключение для прогнозирования"""
+    pass
+
+
+class InsufficientDataError(ForecastingError):
+    """Исключение для недостаточного количества данных"""
+    pass
+
+
+class TimeSeriesPreprocessor:
+    """Предобработчик временных рядов"""
+    
+    def __init__(self):
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        
+    def prepare_time_series(
+        self, 
+        df: pd.DataFrame, 
+        value_column: str,
+        time_column: str = 'timestamp'
+    ) -> pd.DataFrame:
+        """
+        Подготовить временной ряд для прогнозирования
+        
+        Args:
+            df: DataFrame с данными
+            value_column: Название колонки со значениями
+            time_column: Название колонки с временными метками
+            
+        Returns:
+            Подготовленный DataFrame
+        """
+        # Копируем данные
+        ts_df = df.copy()
+        
+        # Убираем пропущенные значения
+        ts_df = ts_df.dropna(subset=[value_column])
+        
+        if len(ts_df) < MIN_OBSERVATIONS:
+            raise InsufficientDataError(
+                f"Недостаточно данных для анализа: {len(ts_df)} < {MIN_OBSERVATIONS}"
+            )
+        
+        # Сортируем по времени
+        ts_df = ts_df.sort_values(time_column)
+        
+        # Проверяем на дубликаты по времени
+        duplicates = ts_df[time_column].duplicated()
+        if duplicates.any():
+            self.logger.warning(f"Найдено {duplicates.sum()} дубликатов по времени, удаляем")
+            ts_df = ts_df[~duplicates]
+        
+        # Ресемплинг к равномерной сетке (если нужно)
+        ts_df = self._resample_to_regular_grid(ts_df, time_column, value_column)
+        
+        self.logger.debug(f"Подготовлен временной ряд: {len(ts_df)} наблюдений")
+        
+        return ts_df
+    
+    def _resample_to_regular_grid(
+        self, 
+        df: pd.DataFrame, 
+        time_column: str, 
+        value_column: str,
+        freq: str = '1H'
+    ) -> pd.DataFrame:
+        """Ресемплинг к равномерной временной сетке"""
+        # Устанавливаем временной индекс
+        df_resampled = df.set_index(time_column)
+        
+        # Ресемплинг с усреднением значений
+        df_resampled = df_resampled.resample(freq)[value_column].mean()
+        
+        # Интерполируем пропущенные значения
+        df_resampled = df_resampled.interpolate(method='linear')
+        
+        # Убираем NaN в начале и конце
+        df_resampled = df_resampled.dropna()
+        
+        # Возвращаем DataFrame
+        result_df = df_resampled.reset_index()
+        result_df.columns = [time_column, value_column]
+        
+        return result_df
+    
+    def detect_and_handle_outliers(
+        self, 
+        df: pd.DataFrame, 
+        value_column: str,
+        method: str = 'iqr',
+        multiplier: float = 1.5
+    ) -> pd.DataFrame:
+        """
+        Обнаружение и обработка выбросов
+        
+        Args:
+            df: DataFrame с данными
+            value_column: Колонка со значениями
+            method: Метод обнаружения ('iqr', 'zscore')
+            multiplier: Множитель для порога
+            
+        Returns:
+            DataFrame с обработанными выбросами
+        """
+        result_df = df.copy()
+        values = result_df[value_column]
+        
+        if method == 'iqr':
+            Q1 = values.quantile(0.25)
+            Q3 = values.quantile(0.75)
+            IQR = Q3 - Q1
+            
+            lower_bound = Q1 - multiplier * IQR
+            upper_bound = Q3 + multiplier * IQR
+            
+            outliers_mask = (values < lower_bound) | (values > upper_bound)
+            
+        elif method == 'zscore':
+            z_scores = np.abs((values - values.mean()) / values.std())
+            outliers_mask = z_scores > multiplier
+            
+        else:
+            raise ValueError(f"Неизвестный метод обнаружения выбросов: {method}")
+        
+        if outliers_mask.any():
+            n_outliers = outliers_mask.sum()
+            self.logger.info(f"Найдено {n_outliers} выбросов, заменяем интерполяцией")
+            
+            # Заменяем выбросы на NaN и интерполируем
+            result_df.loc[outliers_mask, value_column] = np.nan
+            result_df[value_column] = result_df[value_column].interpolate(method='linear')
+        
+        return result_df
+    
+    def check_stationarity(self, series: pd.Series) -> Dict:
+        """
+        Проверка стационарности временного ряда с помощью теста Дики-Фуллера
+        
+        Args:
+            series: Временной ряд
+            
+        Returns:
+            Результаты теста стационарности
+        """
+        # Подавляем предупреждения statsmodels
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            
+            result = adfuller(series.dropna())
+            
+        adf_stat, p_value, used_lag, n_obs, critical_values, ic_best = result
+        
+        stationarity_result = {
+            'adf_statistic': adf_stat,
+            'p_value': p_value,
+            'used_lags': used_lag,
+            'n_observations': n_obs,
+            'critical_values': critical_values,
+            'is_stationary': p_value < 0.05  # 5% уровень значимости
+        }
+        
+        self.logger.debug(
+            f"Тест стационарности: ADF={adf_stat:.4f}, p-value={p_value:.4f}, "
+            f"стационарен={stationarity_result['is_stationary']}"
+        )
+        
+        return stationarity_result
+    
+    def make_stationary(self, series: pd.Series, max_diff: int = 2) -> Tuple[pd.Series, int]:
+        """
+        Приведение ряда к стационарному виду через дифференцирование
+        
+        Args:
+            series: Исходный временной ряд
+            max_diff: Максимальное количество дифференцирований
+            
+        Returns:
+            Кортеж (стационарный ряд, количество дифференцирований)
+        """
+        diff_series = series.copy()
+        diff_order = 0
+        
+        for d in range(max_diff + 1):
+            stationarity = self.check_stationarity(diff_series)
+            
+            if stationarity['is_stationary']:
+                self.logger.debug(f"Ряд стал стационарным после {d} дифференцирований")
+                return diff_series, d
+
+            if d < max_diff:
+                diff_series = diff_series.diff().dropna()
+                diff_order = d + 1
+        
+        self.logger.warning(f"Не удалось достичь стационарности за {max_diff} дифференцирований")
+        return diff_series, diff_order
+
+
+class ARIMAForecaster:
+    """Прогнозирование с помощью ARIMA модели"""
+    
+    def __init__(self):
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        self.model = None
+        self.fitted_model = None
+        self.preprocessor = TimeSeriesPreprocessor()
+        
+    def auto_arima_parameters(self, series: pd.Series) -> Tuple[int, int, int]:
+        """
+        Автоматический подбор параметров ARIMA (p, d, q)
+        
+        Args:
+            series: Временной ряд
+            
+        Returns:
+            Кортеж параметров (p, d, q)
+        """
+        # Определяем порядок дифференцирования (d)
+        _, d = self.preprocessor.make_stationary(series)
+        
+        # Простая эвристика для p и q
+        # В реальном проекте можно использовать более сложные методы
+        max_lag = min(10, len(series) // 4)
+        
+        best_aic = float('inf')
+        best_params = (1, d, 1)
+        
+        # Перебираем параметры p и q
+        for p in range(0, min(3, max_lag)):
+            for q in range(0, min(3, max_lag)):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        
+                        temp_model = ARIMA(series, order=(p, d, q))
+                        temp_fitted = temp_model.fit()
+                        
+                        if temp_fitted.aic < best_aic:
+                            best_aic = temp_fitted.aic
+                            best_params = (p, d, q)
+                            
+                except Exception:
+                    continue
+        
+        self.logger.debug(f"Лучшие параметры ARIMA: {best_params}, AIC={best_aic:.2f}")
+
+        return best_params
+    
+    def fit(self, series: pd.Series, order: Optional[Tuple[int, int, int]] = None) -> Dict:
+        """
+        Обучение ARIMA модели
+        
+        Args:
+            series: Временной ряд для обучения
+            order: Параметры ARIMA (p, d, q). Если None, подбираются автоматически
+            
+        Returns:
+            Результаты обучения
+        """
+        if order is None:
+            order = self.auto_arima_parameters(series)
+        
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                
+                self.model = ARIMA(series, order=order)
+                self.fitted_model = self.model.fit()
+                
+            fit_results = {
+                'order': order,
+                'aic': self.fitted_model.aic,
+                'bic': self.fitted_model.bic,
+                'log_likelihood': self.fitted_model.llf,
+                'success': True
+            }
+            
+            self.logger.info(
+                f"ARIMA{order} обучена: AIC={fit_results['aic']:.2f}, "
+                f"BIC={fit_results['bic']:.2f}"
+            )
+            
+            return fit_results
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обучения ARIMA: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def forecast(self, steps: int) -> Dict:
+        """
+        Прогнозирование на N шагов вперед
+        
+        Args:
+            steps: Количество шагов для прогноза
+            
+        Returns:
+            Результаты прогноза
+        """
+        if self.fitted_model is None:
+            raise ValueError("Модель не обучена")
+        
+        try:
+            forecast_result = self.fitted_model.forecast(steps=steps)
+            confidence_intervals = self.fitted_model.get_forecast(steps=steps).conf_int()
+            
+            forecast_data = {
+                'forecast': forecast_result.tolist(),
+                'lower_ci': confidence_intervals.iloc[:, 0].tolist(),
+                'upper_ci': confidence_intervals.iloc[:, 1].tolist(),
+                'steps': steps,
+                'success': True
+            }
+            
+            self.logger.debug(f"ARIMA прогноз на {steps} шагов: {forecast_result.mean():.4f}")
+            
+            return forecast_data
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка прогнозирования ARIMA: {e}")
+            return {'success': False, 'error': str(e)}
+
+
+class ProphetForecaster:
+    """Прогнозирование с помощью Prophet"""
+    
+    def __init__(self):
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        self.model = None
+        
+    def fit(self, df: pd.DataFrame, time_column: str = 'ds', value_column: str = 'y') -> Dict:
+        """
+        Обучение Prophet модели
+        
+        Args:
+            df: DataFrame с колонками 'ds' (время) и 'y' (значения)
+            time_column: Название колонки времени
+            value_column: Название колонки значений
+            
+        Returns:
+            Результаты обучения
+        """
+        # Подготавливаем данные для Prophet
+        prophet_df = df[[time_column, value_column]].copy()
+        prophet_df.columns = ['ds', 'y']
+        
+        try:
+            # Настраиваем Prophet
+            self.model = Prophet(
+                daily_seasonality=True,
+                weekly_seasonality=True,
+                yearly_seasonality=False,  # Отключаем годовую сезонность для коротких рядов
+                changepoint_prior_scale=0.05,  # Чувствительность к изменениям трендов
+                seasonality_prior_scale=10,    # Сила сезонности
+                interval_width=0.95,           # Доверительный интервал 95%
+                uncertainty_samples=1000
+            )
+            
+            # Подавляем вывод Prophet
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.model.fit(prophet_df)
+            
+            fit_results = {
+                'n_observations': len(prophet_df),
+                'trend_changepoints': len(self.model.changepoints),
+                'success': True
+            }
+            
+            self.logger.info(
+                f"Prophet обучен на {fit_results['n_observations']} наблюдениях, "
+                f"точек изменения тренда: {fit_results['trend_changepoints']}"
+            )
+            
+            return fit_results
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обучения Prophet: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def forecast(self, periods: int, freq: str = 'H') -> Dict:
+        """
+        Прогнозирование с помощью Prophet
+        
+        Args:
+            periods: Количество периодов для прогноза
+            freq: Частота прогноза ('H' - часы, 'D' - дни)
+            
+        Returns:
+            Результаты прогноза
+        """
+        if self.model is None:
+            raise ValueError("Модель не обучена")
+        
+        try:
+            # Создаем будущие даты
+            future = self.model.make_future_dataframe(periods=periods, freq=freq)
+            
+            # Делаем прогноз
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                forecast = self.model.predict(future)
+            
+            # Извлекаем прогнозные значения (только новые периоды)
+            forecast_data = forecast.tail(periods)
+            
+            result = {
+                'forecast': forecast_data['yhat'].tolist(),
+                'lower_ci': forecast_data['yhat_lower'].tolist(),
+                'upper_ci': forecast_data['yhat_upper'].tolist(),
+                'trend': forecast_data['trend'].tolist(),
+                'seasonal': forecast_data.get('seasonal', [0] * periods).tolist(),
+                'dates': forecast_data['ds'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist(),
+                'periods': periods,
+                'success': True
+            }
+            
+            self.logger.debug(
+                f"Prophet прогноз на {periods} периодов: "
+                f"среднее={np.mean(result['forecast']):.4f}"
+            )
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка прогноз��рования Prophet: {e}")
+            return {'success': False, 'error': str(e)}
+
+
+class AnomalyProbabilityCalculator:
+    """Расчет вероятности аномалий на основе прогнозов"""
+
+    def __init__(self):
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+
+    def calculate_threshold_exceedance_probability(
+        self,
+        forecast_values: List[float],
+        confidence_intervals: Tuple[List[float], List[float]],
+        threshold: float,
+        historical_std: float
+    ) -> Dict:
+        """
+        Расчет вероятности превышения порога
+
+        Args:
+            forecast_values: Прогнозные значения
+            confidence_intervals: Нижние и верхние границы доверительного интервала
+            threshold: Пороговое значение для аномалии
+            historical_std: Историческое стандартное отклонение
+
+        Returns:
+            Результаты расчета вероятностей
+        """
+        lower_ci, upper_ci = confidence_intervals
+
+        probabilities = []
+        exceedance_flags = []
+
+        for i, (forecast, lower, upper) in enumerate(zip(forecast_values, lower_ci, upper_ci)):
+            # Метод 1: Простое сравнение с порогом
+            exceeds_threshold = forecast > threshold
+
+            # Метод 2: Вероятность на основе нормального распределения
+            # Предполагаем, что погрешность прогноза нормально распределена
+            forecast_std = (upper - lower) / (2 * 1.96)  # 95% интервал -> std
+
+            if forecast_std > 0:
+                # Z-score для порога
+                z_score = (threshold - forecast) / forecast_std
+                # Вероятность превышения = 1 - CDF(z_score)
+                from scipy import stats
+                prob_exceed = 1 - stats.norm.cdf(z_score)
+            else:
+                prob_exceed = 1.0 if exceeds_threshold else 0.0
+
+            probabilities.append(prob_exceed)
+            exceedance_flags.append(exceeds_threshold)
+
+        # Общая статистика
+        max_probability = max(probabilities) if probabilities else 0.0
+        mean_probability = np.mean(probabilities) if probabilities else 0.0
+        any_exceedance = any(exceedance_flags)
+
+        result = {
+            'step_probabilities': probabilities,
+            'step_exceedance': exceedance_flags,
+            'max_probability': max_probability,
+            'mean_probability': mean_probability,
+            'any_exceedance': any_exceedance,
+            'threshold': threshold,
+            'forecast_horizon': len(forecast_values)
+        }
+
+        self.logger.debug(
+            f"Вероятность аномалии: макс={max_probability:.3f}, "
+            f"средняя={mean_probability:.3f}, превышений={sum(exceedance_flags)}"
+        )
+
+        return result
+
+    def adaptive_threshold_calculation(
+        self,
+        historical_values: List[float],
+        method: str = 'statistical',
+        multiplier: float = DEFAULT_ANOMALY_THRESHOLD
+    ) -> float:
+        """
+        Адаптивный расчет порога аномалии
+
+        Args:
+            historical_values: Исторические значения
+            method: Метод расчета ('statistical', 'quantile')
+            multiplier: Множитель для порога
+
+        Returns:
+            Пороговое значение
+        """
+        values = np.array(historical_values)
+
+        if method == 'statistical':
+            # Среднее + N стандартных отклонений
+            mean_val = np.mean(values)
+            std_val = np.std(values)
+            threshold = mean_val + multiplier * std_val
+
+        elif method == 'quantile':
+            # Процентиль (по умолчанию 95%)
+            quantile = min(0.99, 0.5 + multiplier * 0.3)  # Адаптивный квантиль
+            threshold = np.quantile(values, quantile)
+
+        else:
+            raise ValueError(f"Неизвестный метод расчета порога: {method}")
+
+        self.logger.debug(f"Адаптивный порог ({method}): {threshold:.4f}")
+
+        return threshold
+
+
+class MotorRMSForecaster:
+    """Основной класс для прогнозирования RMS токов двигателя"""
+    
+    def __init__(self):
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        self.preprocessor = TimeSeriesPreprocessor()
+        self.probability_calculator = AnomalyProbabilityCalculator()
+        
+    async def load_rms_time_series(
+        self,
+        equipment_id: UUID,
+        phase: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: Optional[int] = None
+    ) -> pd.DataFrame:
+        """
+        Загрузить временной ряд RMS для конкретной фазы
+        
+        Args:
+            equipment_id: ID оборудования
+            phase: Фаза ('a', 'b', 'c')
+            start_time: Начальное время
+            end_time: Конечное время
+            limit: Максимальное количество записей
+            
+        Returns:
+            DataFrame с временным рядом RMS
+        """
+        phase_column_map = {'a': 'rms_a', 'b': 'rms_b', 'c': 'rms_c'}
+
+        if phase not in phase_column_map:
+            raise ValueError(f"Неизвестная фаза: {phase}")
+
+        rms_column = phase_column_map[phase]
+
+        async with get_async_session() as session:
+            # Строим запрос
+            query = (
+                select(Feature.window_start, getattr(Feature, rms_column))
+                .join(RawSignal)
+                .where(
+                    and_(
+                        RawSignal.equipment_id == equipment_id,
+                        getattr(Feature, rms_column).is_not(None)
+                    )
+                )
+            )
+            
+            # Добавляем временные фильтры
+            if start_time:
+                query = query.where(Feature.window_start >= start_time)
+            if end_time:
+                query = query.where(Feature.window_start <= end_time)
+
+            # Сортируем по времени
+            query = query.order_by(Feature.window_start)
+
+            # Ограничиваем количество
+            if limit:
+                query = query.limit(limit)
+
+            # Выполняем запрос
+            result = await session.execute(query)
+            rows = result.fetchall()
+            
+            if len(rows) < MIN_OBSERVATIONS:
+                raise InsufficientDataError(
+                    f"Недостаточно данных для фазы {phase}: {len(rows)} < {MIN_OBSERVATIONS}"
+                )
+            
+            # Создаем DataFrame
+            df = pd.DataFrame(rows, columns=['timestamp', 'rms_value'])
+            
+            self.logger.info(
+                f"Загружен временной ряд для фазы {phase}: {len(df)} наблюдений "
+                f"с {df['timestamp'].min()} по {df['timestamp'].max()}"
+            )
+            
+            return df
+    
+    async def forecast_phase_rms(
+        self,
+        equipment_id: UUID,
+        phase: str,
+        forecast_steps: int = DEFAULT_FORECAST_STEPS,
+        model_type: str = 'auto',
+        anomaly_threshold_method: str = 'statistical',
+        threshold_multiplier: float = DEFAULT_ANOMALY_THRESHOLD
+    ) -> Dict:
+        """
+        Прогнозирование RMS для конкретной фазы
+        
+        Args:
+            equipment_id: ID оборудования
+            phase: Фаза ('a', 'b', 'c')
+            forecast_steps: Количество шагов прогноза
+            model_type: Тип модели ('arima', 'prophet', 'auto')
+            anomaly_threshold_method: Метод расчета порога аномалии
+            threshold_multiplier: Множитель для порога
+            
+        Returns:
+            Результаты прогнозирования
+        """
+        try:
+            # Загружаем данные
+            df = await self.load_rms_time_series(equipment_id, phase)
+            
+            # Предобработка
+            df_clean = self.preprocessor.prepare_time_series(df, 'rms_value', 'timestamp')
+            df_clean = self.preprocessor.detect_and_handle_outliers(df_clean, 'rms_value')
+
+            # Рассчитываем адаптивный порог
+            threshold = self.probability_calculator.adaptive_threshold_calculation(
+                df_clean['rms_value'].tolist(),
+                method=anomaly_threshold_method,
+                multiplier=threshold_multiplier
+            )
+
+            # Выбираем модель
+            forecast_results = {}
+
+            if model_type in ['arima', 'auto']:
+                # ARIMA прогноз
+                arima_forecaster = ARIMAForecaster()
+                arima_fit = arima_forecaster.fit(df_clean['rms_value'])
+
+                if arima_fit['success']:
+                    arima_forecast = arima_forecaster.forecast(forecast_steps)
+                    if arima_forecast['success']:
+                        forecast_results['arima'] = arima_forecast
+
+            if model_type in ['prophet', 'auto']:
+                # Prophet прогноз
+                prophet_forecaster = ProphetForecaster()
+                prophet_df = df_clean.rename(columns={'timestamp': 'ds', 'rms_value': 'y'})
+                prophet_fit = prophet_forecaster.fit(prophet_df)
+
+                if prophet_fit['success']:
+                    prophet_forecast = prophet_forecaster.forecast(forecast_steps)
+                    if prophet_forecast['success']:
+                        forecast_results['prophet'] = prophet_forecast
+
+            # Выбираем лучший прогноз или комбинируем
+            if model_type == 'auto':
+                final_forecast = self._select_best_forecast(forecast_results)
+            else:
+                final_forecast = forecast_results.get(model_type, {})
+            
+            if not final_forecast or not final_forecast.get('success'):
+                raise ForecastingError(f"Не удалось создать прогноз для фазы {phase}")
+            
+            # Расчет вероятностей аномалий
+            anomaly_probs = self.probability_calculator.calculate_threshold_exceedance_probability(
+                final_forecast['forecast'],
+                (final_forecast['lower_ci'], final_forecast['upper_ci']),
+                threshold,
+                df_clean['rms_value'].std()
+            )
+
+            # Финальный результат
+            result = {
+                'equipment_id': str(equipment_id),
+                'phase': phase,
+                'forecast': final_forecast,
+                'anomaly_analysis': anomaly_probs,
+                'historical_stats': {
+                    'mean': float(df_clean['rms_value'].mean()),
+                    'std': float(df_clean['rms_value'].std()),
+                    'min': float(df_clean['rms_value'].min()),
+                    'max': float(df_clean['rms_value'].max()),
+                    'count': len(df_clean)
+                },
+                'threshold': threshold,
+                'model_used': model_type,
+                'forecast_horizon': forecast_steps,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.logger.info(
+                f"Прогноз для фазы {phase}: модель={model_type}, "
+                f"порог={threshold:.4f}, макс.вероятность={anomaly_probs['max_probability']:.3f}"
+            )
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка прогнозирования фазы {phase}: {e}")
+            raise ForecastingError(f"Ошибка прогнозирования фазы {phase}: {e}")
+    
+    def _select_best_forecast(self, forecast_results: Dict) -> Dict:
+        """Выбор лучшего прогноза из доступных"""
+        if 'prophet' in forecast_results and forecast_results['prophet']['success']:
+            # Prophet обычно лучше для данных с сезонностью
+            return forecast_results['prophet']
+        elif 'arima' in forecast_results and forecast_results['arima']['success']:
+            return forecast_results['arima']
+        else:
+            return {}
+    
+    async def forecast_all_phases(
+        self,
+        equipment_id: UUID,
+        forecast_steps: int = DEFAULT_FORECAST_STEPS,
+        **kwargs
+    ) -> Dict:
+        """
+        Прогнозирование для всех фаз двигателя
+        
+        Args:
+            equipment_id: ID оборудования
+            forecast_steps: Количество шагов прогноза
+            **kwargs: Дополнительные параметры для прогнозирования
+            
+        Returns:
+            Прогнозы для всех доступных фаз
+        """
+        phases = ['a', 'b', 'c']
+        phase_names = {'a': 'R', 'b': 'S', 'c': 'T'}
+
+        results = {
+            'equipment_id': str(equipment_id),
+            'phases': {},
+            'summary': {
+                'total_phases': 0,
+                'successful_phases': 0,
+                'failed_phases': 0,
+                'max_anomaly_probability': 0.0,
+                'critical_phases': []
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        for phase in phases:
+            try:
+                phase_result = await self.forecast_phase_rms(
+                    equipment_id, phase, forecast_steps, **kwargs
+                )
+                
+                results['phases'][phase] = phase_result
+                results['summary']['successful_phases'] += 1
+
+                # Обновляем сводную статистику
+                max_prob = phase_result['anomaly_analysis']['max_probability']
+                if max_prob > results['summary']['max_anomaly_probability']:
+                    results['summary']['max_anomaly_probability'] = max_prob
+                
+                # Критические фазы (вероятность аномалии > 70%)
+                if max_prob > 0.7:
+                    results['summary']['critical_phases'].append({
+                        'phase': phase,
+                        'phase_name': phase_names[phase],
+                        'probability': max_prob
+                    })
+
+                self.logger.debug(f"Фаза {phase_names[phase]}: прогноз готов")
+                
+            except Exception as e:
+                self.logger.warning(f"Не удалось создать прогноз для фазы {phase}: {e}")
+                results['phases'][phase] = {
+                    'error': str(e),
+                    'success': False
+                }
+                results['summary']['failed_phases'] += 1
+        
+        results['summary']['total_phases'] = len(phases)
+        
+        self.logger.info(
+            f"Прогнозирование завершено: {results['summary']['successful_phases']}/{len(phases)} фаз, "
+            f"макс.вероятность аномалии={results['summary']['max_anomaly_probability']:.3f}"
+        )
+        
+        return results
+
+
+# CLI функции
+
+async def forecast_equipment_rms(
+    equipment_id: str,
+    forecast_steps: int = DEFAULT_FORECAST_STEPS,
+    model_type: str = 'auto',
+    phases: Optional[List[str]] = None
+) -> Dict:
+    """
+    Прогнозирование RMS для оборудования
+    
+    Args:
+        equipment_id: ID оборудования
+        forecast_steps: Количество шагов прогноза
+        model_type: Тип модели
+        phases: Список фаз для прогноза (если None, все фазы)
+        
+    Returns:
+        Результаты прогнозирования
+    """
+    forecaster = MotorRMSForecaster()
+    equipment_uuid = UUID(equipment_id)
+    
+    if phases:
+        # Прогноз для конкретных фаз
+        results = {'phases': {}}
+        
+        for phase in phases:
+            try:
+                phase_result = await forecaster.forecast_phase_rms(
+                    equipment_uuid, phase, forecast_steps, model_type
+                )
+                results['phases'][phase] = phase_result
+
+            except Exception as e:
+                results['phases'][phase] = {'error': str(e), 'success': False}
+
+        return results
+    else:
+        # Прогноз для всех фаз
+        return await forecaster.forecast_all_phases(equipment_uuid, forecast_steps)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Прогнозирование RMS токов двигателей")
+    parser.add_argument("equipment_id", help="UUID оборудования")
+    parser.add_argument("--steps", type=int, default=DEFAULT_FORECAST_STEPS,
+                       help="Количество шагов прогноза")
+    parser.add_argument("--model", choices=['arima', 'prophet', 'auto'], default='auto',
+                       help="Тип модели для прогнозирования")
+    parser.add_argument("--phases", nargs="+", choices=['a', 'b', 'c'],
+                       help="Фазы для прогноза (по умолчанию все)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Подробный вывод")
+    
+    args = parser.parse_args()
+
+    # Настраиваем логирование
+    if args.verbose:
+        import logging
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    async def main():
+        try:
+            logger.info(f"Прогнозирование RMS для оборудования {args.equipment_id}")
+
+            results = await forecast_equipment_rms(
+                equipment_id=args.equipment_id,
+                forecast_steps=args.steps,
+                model_type=args.model,
+                phases=args.phases
+            )
+
+            # Выводим результаты
+            if 'summary' in results:
+                summary = results['summary']
+                print(f"\n📊 Сводка прогнозирования:")
+                print(f"  - Фаз обработано: {summary['successful_phases']}/{summary['total_phases']}")
+                print(f"  - Максимальная вероятность аномалии: {summary['max_anomaly_probability']:.1%}")
+
+                if summary['critical_phases']:
+                    print(f"  - Критические фазы:")
+                    for critical in summary['critical_phases']:
+                        print(f"    • Фаза {critical['phase_name']}: {critical['probability']:.1%}")
+
+            for phase, phase_result in results['phases'].items():
+                if phase_result.get('success', True):
+                    anomaly = phase_result['anomaly_analysis']
+                    print(f"\n🔮 Фаза {phase.upper()}:")
+                    print(f"  - Прогноз на {args.steps} шагов")
+                    print(f"  - Порог аномалии: {phase_result['threshold']:.4f}")
+                    print(f"  - Вероятность превышения: {anomaly['max_probability']:.1%}")
+                    if anomaly['any_exceedance']:
+                        print(f"  - ⚠️  Прогнозируется превышение порога!")
+                else:
+                    print(f"\n❌ Фаза {phase.upper()}: {phase_result.get('error', 'Неизвестная ошибка')}")
+
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка прогнозирования: {e}")
+            print(f"❌ Ошибка: {e}")
+            return False
+    
+    import asyncio
+    success = asyncio.run(main())
+    exit(0 if success else 1)

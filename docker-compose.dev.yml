@@ -1,0 +1,81 @@
+# Development override for docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: diagmod_dev
+      POSTGRES_USER: diagmod_dev
+      POSTGRES_PASSWORD: diagmod_dev_password
+
+  redis:
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+
+  api:
+    build:
+      target: development
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://diagmod_dev:diagmod_dev_password@postgres:5432/diagmod_dev
+      - LOG_LEVEL=DEBUG
+      - API_RELOAD=true
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  worker:
+    build:
+      target: development
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://diagmod_dev:diagmod_dev_password@postgres:5432/diagmod_dev
+      - LOG_LEVEL=DEBUG
+      - CELERY_WORKER_CONCURRENCY=2
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+    command: ["celery", "-A", "src.worker.celery_app", "worker", "--loglevel=debug", "--concurrency=2"]
+
+  dashboard:
+    build:
+      target: development
+    environment:
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+
+  # Jupyter notebook for development
+  jupyter:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: development
+    container_name: diagmod_jupyter
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://diagmod_dev:diagmod_dev_password@postgres:5432/diagmod_dev
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./src:/app/src
+      - ./notebooks:/app/notebooks
+      - ./data:/app/data
+      - ./models:/app/models
+    ports:
+      - "8888:8888"
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--notebook-dir=/app"]
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - diagmod_network
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:

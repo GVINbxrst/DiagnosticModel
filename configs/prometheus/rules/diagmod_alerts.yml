@@ -1,0 +1,414 @@
+# DiagMod Alerting Rules for Prometheus
+groups:
+  # System Health Alerts
+  - name: system_health
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is above 80% for more than 5 minutes"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is above 85% for more than 5 minutes"
+
+      - alert: DiskSpaceUsage
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+          service: system
+        annotations:
+          summary: "Low disk space"
+          description: "Disk usage is above 90% for more than 5 minutes"
+
+  # Database Alerts
+  - name: database_health
+    rules:
+      - alert: PostgreSQLDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database is not responding"
+
+      - alert: HighDatabaseConnections
+        expr: (pg_stat_activity_count / pg_settings_max_connections) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database connection usage"
+          description: "Database connection usage is above 80%"
+
+      - alert: LongRunningQueries
+        expr: pg_stat_activity_max_tx_duration{state="active"} > 300
+        for: 2m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Long running database queries detected"
+          description: "Query running for more than 5 minutes detected"
+
+  # Redis Alerts
+  - name: redis_health
+    rules:
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Redis server is not responding"
+
+      - alert: RedisHighMemoryUsage
+        expr: (redis_memory_used_bytes / redis_memory_max_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis high memory usage"
+          description: "Redis memory usage is above 90%"
+
+  # API Service Alerts
+  - name: api_health
+    rules:
+      - alert: APIDown
+        expr: up{job="diagmod-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "DiagMod API is down"
+          description: "API service is not responding"
+
+      - alert: HighAPIResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "High API response time"
+          description: "95th percentile response time is above 2 seconds"
+
+      - alert: HighAPIErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "High API error rate"
+          description: "API error rate is above 5%"
+
+  # Celery Worker Alerts
+  - name: celery_health
+    rules:
+      - alert: CeleryWorkersDown
+        expr: celery_workers_total == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: worker
+        annotations:
+          summary: "No Celery workers available"
+          description: "All Celery workers are down"
+
+      - alert: HighCeleryQueueLength
+        expr: celery_queue_length > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: worker
+        annotations:
+          summary: "High Celery queue length"
+          description: "Celery queue has more than 1000 pending tasks"
+
+      - alert: CeleryTaskFailureRate
+        expr: rate(celery_task_total{state="FAILURE"}[5m]) / rate(celery_task_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: worker
+        annotations:
+          summary: "High Celery task failure rate"
+          description: "Celery task failure rate is above 10%"
+
+  # DiagMod Business Logic Alerts
+  - name: diagmod_business
+    rules:
+      - alert: CriticalAnomalyDetected
+        expr: diagmod_critical_anomalies_total > 0
+        for: 0s
+        labels:
+          severity: critical
+          service: ml
+        annotations:
+          summary: "Critical anomaly detected in motor"
+          description: "ML model detected critical anomaly in motor operation"
+
+      - alert: HighAnomalyRate
+        expr: rate(diagmod_anomalies_total[1h]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: ml
+        annotations:
+          summary: "High anomaly detection rate"
+          description: "More than 10 anomalies detected per hour"
+
+      - alert: ModelPredictionLatency
+        expr: diagmod_model_prediction_duration_seconds > 30
+        for: 2m
+        labels:
+          severity: warning
+          service: ml
+        annotations:
+          summary: "High ML model prediction latency"
+          description: "Model prediction taking more than 30 seconds"
+
+      - alert: NoDataFromMotor
+        expr: time() - diagmod_last_signal_timestamp > 3600
+        for: 0s
+        labels:
+          severity: warning
+          service: data
+        annotations:
+          summary: "No data received from motor"
+          description: "No signal data received from motor for more than 1 hour"
+
+  # Data Processing Alerts
+  - name: data_processing
+    rules:
+      - alert: CSVProcessingFailures
+        expr: rate(diagmod_csv_processing_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: data
+        annotations:
+          summary: "High CSV processing failure rate"
+          description: "CSV processing failure rate is above 10%"
+
+      - alert: FeatureExtractionDelay
+        expr: diagmod_feature_extraction_lag_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+          service: ml
+        annotations:
+          summary: "Feature extraction delay"
+          description: "Feature extraction is delayed by more than 30 minutes"
+
+  - name: diagmod_alerts
+    rules:
+      # API мониторинг
+      - alert: HighAPIErrorRate
+        expr: (rate(api_requests_total{status_code=~"5.."}[5m]) / rate(api_requests_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          service: diagmod-api
+        annotations:
+          summary: "Высокий уровень ошибок API ({{ $value | humanizePercentage }})"
+          description: "API возвращает более 10% ошибок 5xx в течение последних 5 минут"
+
+      - alert: SlowAPIResponse
+        expr: histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[5m])) > 5
+        for: 3m
+        labels:
+          severity: warning
+          service: diagmod-api
+        annotations:
+          summary: "Медленные API ответы (95% перцентиль: {{ $value }}s)"
+          description: "95% API запросов выполняются дольше 5 секунд"
+
+      # Аномалии и прогнозирование
+      - alert: HighAnomalyDetectionRate
+        expr: rate(anomalies_detected_total[1h]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-ml
+        annotations:
+          summary: "Высокая частота обнаружения аномалий ({{ $value }}/час)"
+          description: "Обнаружено более 100 аномалий за последний час, возм��жны проблемы с оборудованием"
+
+      - alert: SlowAnomalyDetection
+        expr: histogram_quantile(0.95, rate(anomaly_detection_duration_seconds_bucket[10m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-ml
+        annotations:
+          summary: "Медленное обнаружение аномалий ({{ $value }}s)"
+          description: "95% процессов обнаружения аномалий выполняются дольше 30 секунд"
+
+      - alert: SlowForecastGeneration
+        expr: histogram_quantile(0.95, rate(forecast_latency_seconds_bucket[10m])) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-ml
+        annotations:
+          summary: "Медленная генерация прогнозов ({{ $value }}s)"
+          description: "95% прогнозов генерируются дольше 5 минут"
+
+      # Worker мониторинг
+      - alert: WorkerTaskFailures
+        expr: rate(worker_tasks_total{status="error"}[10m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          service: diagmod-worker
+        annotations:
+          summary: "Высокий уровень ошибок Worker задач ({{ $value }}/мин)"
+          description: "Более 10% задач Worker завершаются с ошибкой"
+
+      - alert: HighWorkerTaskQueue
+        expr: worker_active_tasks > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-worker
+        annotations:
+          summary: "Бо��ьшая очередь задач Worker ({{ $value }} активных задач)"
+          description: "В очереди Worker более 50 активных задач"
+
+      # Системные ресурсы
+      - alert: HighCPUUsage
+        expr: system_cpu_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-system
+        annotations:
+          summary: "Высокая загрузка CPU ({{ $value }}%)"
+          description: "Использование CPU превышает 85% в течение 5 минут"
+
+      - alert: HighMemoryUsage
+        expr: (system_memory_usage_bytes{type="used"} / system_memory_usage_bytes{type="total"}) * 100 > 90
+        for: 3m
+        labels:
+          severity: critical
+          service: diagmod-system
+        annotations:
+          summary: "Критическое использование памяти ({{ $value }}%)"
+          description: "Использование памяти превышает 90%"
+
+      - alert: HighDiskUsage
+        expr: (system_disk_usage_bytes{type="used"} / system_disk_usage_bytes{type="total"}) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-system
+        annotations:
+          summary: "Высокое использование диска ({{ $value }}%)"
+          description: "Использование диска превышает 85%"
+
+      # База данных
+      - alert: DatabaseConnectionPoolExhaustion
+        expr: database_connections_active > 80
+        for: 2m
+        labels:
+          severity: critical
+          service: diagmod-database
+        annotations:
+          summary: "Исчерпание пула подключений к БД ({{ $value }} активных)"
+          description: "Количество активных подключений к базе данных критически высокое"
+
+      - alert: SlowDatabaseQueries
+        expr: histogram_quantile(0.95, rate(database_query_duration_seconds_bucket[5m])) > 1
+        for: 3m
+        labels:
+          severity: warning
+          service: diagmod-database
+        annotations:
+          summary: "Медленные запросы к БД (95% перцентиль: {{ $value }}s)"
+          description: "95% запросов к базе данных выполняются дольше 1 секунды"
+
+      # Обработка данных
+      - alert: CSVProcessingErrors
+        expr: rate(csv_files_processed_total{status="error"}[10m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          service: diagmod-processing
+        annotations:
+          summary: "Ошибки обработки CSV файлов ({{ $value }}/мин)"
+          description: "Более 5% CSV файлов обрабатываются с ошибками"
+
+      - alert: SlowCSVProcessing
+        expr: histogram_quantile(0.95, rate(csv_processing_duration_seconds_bucket[10m])) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: diagmod-processing
+        annotations:
+          summary: "Медленная обработка CSV ({{ $value }}s)"
+          description: "95% CSV файлов обрабатываются дольше 5 минут"
+
+      # Доступность сервисов
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервис {{ $labels.job }} недоступен"
+          description: "Сервис {{ $labels.job }} не отвечает на проверки состояния"
+
+      # Критические аномалии оборудования
+      - alert: CriticalEquipmentAnomaly
+        expr: increase(anomalies_detected_total{defect_type="critical"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: diagmod-equipment
+        annotations:
+          summary: "Критическая аномалия оборудования {{ $labels.equipment_id }}"
+          description: "Обнаружена критическая аномалия в работе оборудования, требуется немедленное вмешательство"
+
+  - name: diagmod_capacity_alerts
+    rules:
+      # Планирование ёмкости
+      - alert: DataGrowthRate
+        expr: rate(data_points_processed_total[1d]) > 1000000
+        for: 1h
+        labels:
+          severity: info
+          service: diagmod-capacity
+        annotations:
+          summary: "Высокая скорость роста данных ({{ $value }}/день)"
+          description: "Обрабатывается более 1M точек данных в день, рассмотрите масштабирование"
+
+      - alert: ForecastBacklog
+        expr: rate(forecasts_generated_total{status="success"}[1h]) < rate(anomalies_detected_total[1h]) * 0.1
+        for: 30m
+        labels:
+          severity: warning
+          service: diagmod-capacity
+        annotations:
+          summary: "Отставание генерации прогнозов"
+          description: "Прогнозы генерируются слишком медленно относительно скорости обнаружения аномалий"

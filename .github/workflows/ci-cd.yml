@@ -1,0 +1,298 @@
+name: DiagMod CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: diagmod
+
+jobs:
+  # Job 1: Code Quality and Testing
+  test:
+    name: Code Quality & Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: diagmod_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e ".[dev,test]"
+
+    - name: Create test environment file
+      run: |
+        cat > .env.test << EOF
+        DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/diagmod_test
+        REDIS_URL=redis://localhost:6379/0
+        CELERY_BROKER_URL=redis://localhost:6379/1
+        CELERY_RESULT_BACKEND=redis://localhost:6379/2
+        SECRET_KEY=test-secret-key
+        JWT_SECRET_KEY=test-jwt-secret
+        API_HOST=localhost
+        API_PORT=8000
+        LOG_LEVEL=DEBUG
+        EOF
+
+    - name: Setup test database
+      run: |
+        export $(cat .env.test | xargs)
+        python -c "
+        import asyncio
+        from src.database.connection import create_tables
+        asyncio.run(create_tables())
+        "
+
+    - name: Lint with ruff
+      run: |
+        ruff check src/ tests/
+        ruff format --check src/ tests/
+
+    - name: Type check with mypy
+      run: |
+        mypy src/
+
+    - name: Security check with bandit
+      run: |
+        bandit -r src/ -f json -o bandit-report.json
+      continue-on-error: true
+
+    - name: Run unit tests
+      run: |
+        export $(cat .env.test | xargs)
+        pytest tests/unit/ -v --cov=src --cov-report=xml --cov-report=html
+
+    - name: Run integration tests
+      run: |
+        export $(cat .env.test | xargs)
+        pytest tests/integration/ -v
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./coverage.xml
+        fail_ci_if_error: false
+
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          htmlcov/
+          bandit-report.json
+          pytest-report.xml
+
+  # Job 2: Build Docker Images
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+
+    strategy:
+      matrix:
+        service: [api, worker, dashboard]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix={{branch}}-
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/${{ matrix.service }}/Dockerfile
+        target: production
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+  # Job 3: Security Scanning
+  security:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+
+    strategy:
+      matrix:
+        service: [api, worker, dashboard]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results-${{ matrix.service }}.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
+
+  # Job 4: Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure staging environment
+      run: |
+        cat > .env.staging << EOF
+        COMPOSE_PROJECT_NAME=diagmod-staging
+        DATABASE_URL=postgresql+asyncpg://diagmod_user:${{ secrets.STAGING_DB_PASSWORD }}@staging-postgres:5432/diagmod
+        REDIS_URL=redis://staging-redis:6379/0
+        SECRET_KEY=${{ secrets.STAGING_SECRET_KEY }}
+        JWT_SECRET_KEY=${{ secrets.STAGING_JWT_SECRET }}
+        API_HOST=0.0.0.0
+        API_PORT=8000
+        LOG_LEVEL=INFO
+        EOF
+
+    - name: Deploy to staging
+      run: |
+        # В реальном проекте здесь будет развертывание на staging сервер
+        echo "Deploying to staging environment..."
+        # docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests on staging..."
+        # Здесь могут быть smoke tests для staging
+
+  # Job 5: Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test, build, security]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure production environment
+      run: |
+        cat > .env.production << EOF
+        COMPOSE_PROJECT_NAME=diagmod-production
+        DATABASE_URL=postgresql+asyncpg://diagmod_user:${{ secrets.PROD_DB_PASSWORD }}@prod-postgres:5432/diagmod
+        REDIS_URL=redis://prod-redis:6379/0
+        SECRET_KEY=${{ secrets.PROD_SECRET_KEY }}
+        JWT_SECRET_KEY=${{ secrets.PROD_JWT_SECRET }}
+        API_HOST=0.0.0.0
+        API_PORT=8000
+        LOG_LEVEL=WARNING
+        EOF
+
+    - name: Deploy to production
+      run: |
+        # В реальном проекте здесь будет развертывание на production сервер
+        echo "Deploying to production environment..."
+        # docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+    - name: Run production health checks
+      run: |
+        echo "Running production health checks..."
+        # Здесь будут health checks для production
+
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+  # Job 6: Cleanup
+  cleanup:
+    name: Cleanup Old Images
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+
+    steps:
+    - name: Delete old container images
+      uses: actions/delete-package-versions@v4
+      with:
+        package-name: diagmod/api
+        package-type: container
+        min-versions-to-keep: 10
+        delete-only-untagged-versions: true

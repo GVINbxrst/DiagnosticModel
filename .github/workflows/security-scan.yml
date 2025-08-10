@@ -1,0 +1,80 @@
+name: Security Scan
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Каждый день в 2:00 UTC
+  workflow_dispatch:
+
+jobs:
+  dependency-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit semgrep
+
+    - name: Safety check (dependency vulnerabilities)
+      run: |
+        pip install -r requirements.txt
+        safety check --json --output safety-report.json
+      continue-on-error: true
+
+    - name: Bandit security check
+      run: |
+        bandit -r src/ -f json -o bandit-report.json
+      continue-on-error: true
+
+    - name: Semgrep security scan
+      run: |
+        semgrep --config=auto src/ --json --output=semgrep-report.json
+      continue-on-error: true
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          safety-report.json
+          bandit-report.json
+          semgrep-report.json
+
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    strategy:
+      matrix:
+        service: [api, worker, dashboard]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build image for scanning
+      run: |
+        docker build -f docker/${{ matrix.service }}/Dockerfile -t diagmod-${{ matrix.service }}:scan .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: diagmod-${{ matrix.service }}:scan
+        format: 'json'
+        output: 'trivy-${{ matrix.service }}-report.json'
+
+    - name: Upload Trivy scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: trivy-reports
+        path: trivy-*-report.json

@@ -1,0 +1,126 @@
+# Production configuration for docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: diagmod_prod
+      POSTGRES_USER: diagmod_prod
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  redis:
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: '1.0'
+
+  api:
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://diagmod_prod:${POSTGRES_PASSWORD}@postgres:5432/diagmod_prod
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - LOG_LEVEL=WARNING
+      - API_WORKERS=8
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+
+  worker:
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://diagmod_prod:${POSTGRES_PASSWORD}@postgres:5432/diagmod_prod
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_WORKER_CONCURRENCY=8
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  dashboard:
+    environment:
+      - API_URL=http://nginx/api
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+      restart_policy:
+        condition: on-failure
+
+  nginx:
+    volumes:
+      - ./configs/nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/nginx/ssl:/etc/nginx/ssl:ro
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # SSL certificate renewal
+  certbot:
+    image: certbot/certbot
+    container_name: diagmod_certbot
+    volumes:
+      - ./configs/nginx/ssl:/etc/letsencrypt
+      - ./configs/nginx/ssl-challenge:/tmp/acme-challenge
+    command: >
+      sh -c "while :; do
+        certbot renew --webroot --webroot-path /tmp/acme-challenge --quiet
+        sleep 12h
+      done"
+    depends_on:
+      - nginx
+    restart: unless-stopped
+
+  # Log aggregation
+  promtail:
+    image: grafana/promtail:latest
+    container_name: diagmod_promtail
+    volumes:
+      - ./logs:/var/log/diagmod:ro
+      - ./configs/promtail/promtail.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - api
+      - worker
+    restart: unless-stopped

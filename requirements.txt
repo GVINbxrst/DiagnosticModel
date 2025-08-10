@@ -1,0 +1,97 @@
+# Веб-фреймворк
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+streamlit==1.37.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-multipart==0.0.19
+
+# База данных
+sqlalchemy[asyncio]==2.0.23
+asyncpg==0.29.0
+alembic==1.12.1
+psycopg2-binary==2.9.10
+
+# Очереди и кеш
+celery[redis]==5.3.4
+redis==5.0.1
+
+# ML и анализ данных
+numpy==1.24.3
+scipy==1.11.4
+pandas==2.1.3
+scikit-learn==1.5.0
+xgboost==2.0.2
+statsmodels==0.14.0
+prophet==1.1.5
+
+# Визу��лизация данных
+matplotlib==3.7.2
+seaborn==0.12.2
+plotly==5.17.0
+
+# ML дополнительные
+joblib==1.3.2
+imbalanced-learn==0.11.0
+
+# Обработка сигналов
+librosa==0.10.1
+pywavelets==1.4.1
+
+# Мониторинг и логирование
+prometheus-client==0.19.0
+structlog==23.2.0
+python-json-logger==2.0.7
+psutil==5.9.6
+
+# Безопасность и аутентификация
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+
+# HTTP клиенты и запросы
+httpx==0.25.2
+requests==2.31.0
+aiohttp==3.9.1
+
+# Валидация и конфигурация
+python-dotenv==1.0.0
+PyYAML==6.0.1
+
+# PDF генерация для отчетов
+reportlab==4.0.7
+
+# Дополнительные Streamlit компоненты
+streamlit-authenticator==0.2.3
+streamlit-option-menu==0.3.6
+
+# Обработка изображений и графиков
+Pillow==10.1.0
+
+# Утилиты для работы с датами
+python-dateutil==2.8.2
+
+# Сжатие данных
+lz4==4.3.2
+
+# Дополнительные утилиты
+click==8.1.7
+tqdm==4.66.1
+
+# Экспорт данных
+openpyxl==3.1.2
+
+# Дополнительные научные библиотеки
+numba==0.58.1
+
+# Работа с конфигурационными файлами
+toml==0.10.2
+
+# Дополнительные зависимости для async работы
+aiofiles==23.2.1
+
+# Валидация схем данных
+jsonschema==4.20.0
+
+# Поддержка часовых поясов
+pytz==2023.3
