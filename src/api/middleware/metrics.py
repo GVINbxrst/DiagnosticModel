@@ -181,7 +181,8 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
                 user_role = getattr(request.state.user, 'role', 'unknown')
                 user_id = getattr(request.state.user, 'id', 'unknown')
         except Exception:
-            pass
+            # Игнорируем ошибки извлечения пользователя для метрик
+            ...
 
         response = None
         status_code = 500

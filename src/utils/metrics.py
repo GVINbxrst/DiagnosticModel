@@ -6,6 +6,7 @@
 import time
 from functools import wraps
 from typing import Dict, Optional, Callable, Any
+import asyncio
 from datetime import datetime
 
 from prometheus_client import (
@@ -176,8 +177,8 @@ class MetricsCollector:
 
     def _start_system_metrics_collection(self):
         """Начало сбора системных метрик"""
-        # Эти метрики будут обновляться периодически
-        pass
+    # Эти метрики будут обновляться периодически (внешним планировщиком / background task)
+    return None
 
     def update_system_metrics(self):
         """Обновление системных метрик"""
@@ -186,6 +187,97 @@ class MetricsCollector:
             cpu_percent = psutil.cpu_percent(interval=1)
             system_cpu_usage_percent.set(cpu_percent)
 
+    # --- Унифицированные утилиты ---
+
+def increment(metric_name: str, labels: Optional[Dict[str, str]] = None):
+    """Увеличить Counter по имени.
+    Пример: increment('api_requests_total', {'method':'GET','endpoint':'/signals','status_code':'200','user_role':'engineer'})
+    """
+    metric = globals().get(metric_name)
+    if metric is None:
+        logger.warning(f"Метрика {metric_name} не найдена для increment")
+        return
+    if labels:
+        metric.labels(**labels).inc()
+    else:
+        metric.inc()
+
+
+def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
+    """Декоратор измерения времени выполнения и записи в Histogram.
+
+    Если переданы labels – используются они, иначе выполняется попытка авто-лейблинга.
+    """
+    def decorator(func: Callable):
+        is_coroutine = asyncio.iscoroutinefunction(func) if 'asyncio' in globals() else hasattr(func, '__await__')
+
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                hist = globals().get(metric_name)
+                if hist is not None:
+                    try:
+                        if labels:
+                            hist.labels(**labels).observe(duration) if getattr(hist, '_labelnames', None) else hist.observe(duration)
+                        else:
+                            endpoint = kwargs.get('endpoint') or getattr(func, '__name__', 'unknown')
+                            if hasattr(hist, 'labels') and hist._labelnames:  # type: ignore
+                                labelnames = list(hist._labelnames)  # type: ignore
+                                values = {}
+                                for ln in labelnames:
+                                    if ln == 'endpoint':
+                                        values[ln] = endpoint
+                                    elif ln == 'method':
+                                        values[ln] = kwargs.get('method', 'AUTO')
+                                    else:
+                                        values[ln] = 'auto'
+                                hist.labels(**values).observe(duration)
+                            else:
+                                hist.observe(duration)
+                    except Exception as e:  # noqa
+                        logger.debug(f"Не удалось записать latency в {metric_name}: {e}")
+
+        async def async_wrapper(*args, **kwargs):  # type: ignore
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                hist = globals().get(metric_name)
+                if hist is not None:
+                    try:
+                        if labels:
+                            hist.labels(**labels).observe(duration) if getattr(hist, '_labelnames', None) else hist.observe(duration)
+                        else:
+                            endpoint = kwargs.get('endpoint') or getattr(func, '__name__', 'unknown')
+                            if hasattr(hist, 'labels') and getattr(hist, '_labelnames', None):  # type: ignore
+                                labelnames = list(hist._labelnames)  # type: ignore
+                                values = {}
+                                for ln in labelnames:
+                                    if ln == 'endpoint':
+                                        values[ln] = endpoint
+                                    elif ln == 'method':
+                                        values[ln] = kwargs.get('method', 'AUTO')
+                                    else:
+                                        values[ln] = 'auto'
+                                hist.labels(**values).observe(duration)
+                            else:
+                                hist.observe(duration)
+                    except Exception as e:  # noqa
+                        logger.debug(f"Не удалось записать latency в {metric_name}: {e}")
+
+        return async_wrapper if is_coroutine else sync_wrapper
+
+    return decorator
+
+
+__all__ = [
+    'increment', 'observe_latency'
+]
             # Память
             memory = psutil.virtual_memory()
             system_memory_usage_bytes.labels(type='used').set(memory.used)

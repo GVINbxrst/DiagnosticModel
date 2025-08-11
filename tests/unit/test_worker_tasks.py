@@ -37,7 +37,8 @@ def mock_raw_signal():
 
     # Мокаем сжатые данные фаз
     test_data = np.random.normal(0, 1, 1000).astype(np.float32)
-    compressed = test_data.tobytes()
+    from src.utils.serialization import dump_float32_array
+    compressed = dump_float32_array(test_data)
 
     signal.phase_a = compressed
     signal.phase_b = compressed
@@ -103,7 +104,8 @@ class TestCoreWorkerTasks:
         """Тест распаковки сжатых данных"""
         # Создаем тестовые данные
         original_data = np.random.normal(0, 1, 100).astype(np.float32)
-        compressed = original_data.tobytes()
+    from src.utils.serialization import dump_float32_array
+    compressed = dump_float32_array(original_data)
 
         # Тестируем распаковку
         decompressed = await decompress_signal_data(compressed)
@@ -156,6 +158,43 @@ class TestCoreWorkerTasks:
             # Проверяем, что запрос был выполнен
             mock_session.execute.assert_called_once()
             mock_session.commit.assert_called_once()
+
+        def test_idempotent_process_raw(self, monkeypatch):
+            """Повторный вызов process_raw не должен повторно обрабатывать COMPLETED сигнал"""
+            from src.worker import tasks as worker_tasks
+
+            class DummySignal:
+                def __init__(self, status):
+                    self.id = uuid4()
+                    self.processing_status = status
+                    self.phase_a = None
+                    self.phase_b = None
+                    self.phase_c = None
+                    self.sample_rate_hz = 25600
+                    self.recorded_at = datetime.utcnow()
+
+            completed = DummySignal(status=ProcessingStatus.COMPLETED)
+
+            async def fake_session_ctx():
+                class Ctx:
+                    async def __aenter__(self):
+                        class S:
+                            async def execute(self, q):
+                                class R:
+                                    def scalar_one_or_none(self_inner):
+                                        return completed
+                                return R()
+                            async def commit(self):
+                                pass
+                        return S()
+                    async def __aexit__(self, exc_type, exc, tb):
+                        return False
+                return Ctx()
+
+            monkeypatch.setattr(worker_tasks, 'get_async_session', fake_session_ctx)
+            # Прямой вызов _process_raw_async
+            result = asyncio.run(worker_tasks._process_raw_async(str(uuid4())))
+            assert result['status'] == 'skipped'
 
     @pytest.mark.asyncio
     async def test_process_raw_async_success(self, mock_raw_signal):

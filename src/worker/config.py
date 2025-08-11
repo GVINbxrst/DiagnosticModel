@@ -223,7 +223,8 @@ def setup_worker_signals(celery_app: Celery):
 def setup_celery_logging(**kwargs):
     """Настройка логирования для Celery"""
     # Используем наш собственный логгер
-    pass  # Логирование уже настроено в src.utils.logger
+        # Локальная функция оставлена для совместимости; настройка логгера централизована в src.utils.logger
+        return None
 
 
 def get_worker_info() -> Dict[str, Any]:

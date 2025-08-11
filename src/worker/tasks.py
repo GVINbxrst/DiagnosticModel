@@ -9,7 +9,6 @@ Celery задачи для фоновой обработки данных диа
 """
 
 import asyncio
-import gzip
 import json
 import traceback
 import time
@@ -37,9 +36,12 @@ from src.utils.logger import get_logger
 from src.worker.celery_app import celery_app
 from src.worker.monitoring import track_task_metrics, get_worker_metrics_collector
 from src.utils.metrics import (
+    # оставляем существующие импорты метрик если используются далее
     track_csv_processing, track_anomaly_detection,
     track_forecast_generation, increment_counter, observe_histogram
 )
+from src.utils.serialization import load_float32_array, dump_float32_array
+from src.utils.metrics import observe_latency as _observe_latency
 
 # Настройки
 settings = get_settings()
@@ -135,20 +137,20 @@ class DatabaseTask(Task):
 
 
 async def decompress_signal_data(compressed_data: bytes) -> np.ndarray:
-    """Распаковка сжатых сигнальных данных"""
+    """Распаковка через централизованный util."""
     try:
-        decompressed = gzip.decompress(compressed_data)
-        # Восстанавливаем float32 массив
-        return np.frombuffer(decompressed, dtype=np.float32)
+        arr = load_float32_array(compressed_data)
+        return arr if arr is not None else np.array([], dtype=np.float32)
     except Exception as e:
         logger.error(f"Ошибка распаковки данных: {e}")
         raise
 
 
 async def compress_and_store_results(data: Any) -> bytes:
-    """Сжатие результатов для хранения"""
+    """Сжатие результатов json в gzip (оставляем локально, не массив)."""
     try:
         json_str = json.dumps(data, ensure_ascii=False, default=str)
+        import gzip
         return gzip.compress(json_str.encode('utf-8'))
     except Exception as e:
         logger.error(f"Ошибка сжатия результатов: {e}")
@@ -178,7 +180,15 @@ def process_raw(self, raw_id: str) -> Dict:
 
     try:
         # Запускаем асинхронную обработку
+        # Измеряем через observe_latency вручную (Celery не async)
+        latency_start = time.time()
         result = asyncio.run(_process_raw_async(raw_id))
+        duration = time.time() - latency_start
+        try:
+            from src.utils.metrics import worker_task_duration_seconds
+            worker_task_duration_seconds.labels(task_name='process_raw').observe(duration)
+        except Exception as metrics_exc:
+            self.logger.debug(f"Не удалось записать метрику длительности: {metrics_exc}")
 
         processing_time = (datetime.utcnow() - task_start).total_seconds()
         result['processing_time_seconds'] = processing_time
@@ -216,6 +226,11 @@ async def _process_raw_async(raw_id: str) -> Dict:
         if not raw_signal:
             raise ValueError(f"Сырой сигнал {raw_id} не найден")
 
+        # Идемпотентность: если уже завершено или в процессе, выходим
+        if raw_signal.processing_status in {ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING}:
+            logger.info(f"Сырой сигнал {raw_id} уже в статусе {raw_signal.processing_status}, пропуск")
+            return {'status': 'skipped', 'raw_signal_id': raw_id}
+
         # Обновляем статус на "в обработке"
         await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
 
@@ -225,10 +240,8 @@ async def _process_raw_async(raw_id: str) -> Dict:
 
             if raw_signal.phase_a:
                 phase_data['phase_a'] = await decompress_signal_data(raw_signal.phase_a)
-
             if raw_signal.phase_b:
                 phase_data['phase_b'] = await decompress_signal_data(raw_signal.phase_b)
-
             if raw_signal.phase_c:
                 phase_data['phase_c'] = await decompress_signal_data(raw_signal.phase_c)
 
@@ -237,7 +250,7 @@ async def _process_raw_async(raw_id: str) -> Dict:
 
             # Извлекаем признаки
             extractor = FeatureExtractor(
-                sample_rate=raw_signal.sample_rate or 25600
+                sample_rate=raw_signal.sample_rate_hz or 25600
             )
 
             # Обрабатываем сигнал с временными окнами

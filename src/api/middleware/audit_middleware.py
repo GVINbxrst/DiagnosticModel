@@ -104,8 +104,8 @@ class SecurityAuditMiddleware(BaseHTTPMiddleware):
                     'session_id': payload.get("session_id")
                 }
         except Exception:
-            # Невалидный токен - не логируем как ошибку, может быть анонимный доступ
-            pass
+            # Невалидный токен - просто возвращаем None (анонимный доступ)
+            return None
 
         return None
 

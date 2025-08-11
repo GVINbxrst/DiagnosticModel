@@ -286,10 +286,10 @@ class TestSignalsEndpoints:
         mock_signal.processing_status = "completed"
 
         # Мокаем сжатые данные фаз
-        import gzip
-        import numpy as np
-        test_data = np.random.normal(0, 1, 100).astype(np.float32)
-        compressed_data = gzip.compress(test_data.tobytes())
+    import numpy as np
+    from src.utils.serialization import dump_float32_array
+    test_data = np.random.normal(0, 1, 100).astype(np.float32)
+    compressed_data = dump_float32_array(test_data)
 
         mock_signal.phase_a = compressed_data
         mock_signal.phase_b = compressed_data

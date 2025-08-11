@@ -41,12 +41,12 @@ SEASONALITY_PERIOD = 24  # Период сезонности (24 часа)
 
 class ForecastingError(Exception):
     """Базовое исключение для прогнозирования"""
-    pass
+    ...
 
 
 class InsufficientDataError(ForecastingError):
     """Исключение для недостаточного количества данных"""
-    pass
+    ...
 
 
 class TimeSeriesPreprocessor:

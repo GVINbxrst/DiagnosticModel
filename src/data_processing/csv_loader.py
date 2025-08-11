@@ -11,7 +11,6 @@ CSV Loader для токовых сигналов асинхронных дви�
 
 import asyncio
 import csv
-import gzip
 import hashlib
 import os
 import struct
@@ -28,6 +27,7 @@ from src.config.settings import get_settings
 from src.database.connection import get_async_session
 from src.database.models import Equipment, RawSignal
 from src.utils.logger import get_logger
+from src.utils.serialization import dump_float32_array, load_float32_array
 
 # Настройки
 settings = get_settings()
@@ -42,12 +42,12 @@ EXPECTED_HEADER_PATTERN = ['current_R', 'current_S', 'current_T']
 
 class CSVLoaderError(Exception):
     """Базовое исключение для CSV Loader"""
-    pass
+    ...  # Docstring достаточен
 
 
 class InvalidCSVFormatError(CSVLoaderError):
     """Исключение для некорректного формата CSV"""
-    pass
+    ...
 
 
 class CSVProcessingStats:
@@ -62,11 +62,21 @@ class CSVProcessingStats:
         self.start_time: datetime = datetime.now()
         self.end_time: Optional[datetime] = None
         self.batches_processed: int = 0
+        # Новые поля по контракту возврата
+        self.raw_signal_ids: List[UUID] = []
+        self.samples_count_total: int = 0
+        self.phases_present: Dict[str, bool] = {"R": False, "S": False, "T": False}
 
-    def add_batch_stats(self, batch_size: int, nan_counts: Dict[str, int]):
+    def add_batch_stats(self, batch_size: int, nan_counts: Dict[str, int], raw_id: Optional[UUID], samples_count: int, phases_present: Dict[str, bool]):
         """Добавить статистику обработанной пачки"""
         self.processed_rows += batch_size
         self.batches_processed += 1
+        if raw_id:
+            self.raw_signal_ids.append(raw_id)
+        self.samples_count_total += samples_count
+        for p, has in phases_present.items():
+            if has:
+                self.phases_present[p] = True
 
         for phase, count in nan_counts.items():
             self.nan_values[phase] += count
@@ -98,56 +108,31 @@ class CSVProcessingStats:
             'nan_values': self.nan_values,
             'processing_time_seconds': self.processing_time,
             'rows_per_second': self.rows_per_second,
-            'batches_processed': self.batches_processed
+            'batches_processed': self.batches_processed,
+            'raw_signal_ids': [str(r) for r in self.raw_signal_ids],
+            'samples_count_total': self.samples_count_total,
+            'phases_present': self.phases_present
         }
 
+    # Совместимость со старым интерфейсом
+    @property
+    def raw_signal_id(self):  # type: ignore
+        return self.raw_signal_ids[0] if self.raw_signal_ids else None
 
-def compress_float32_array(data: np.ndarray) -> bytes:
-    """
-    Сжать массив float32 в gzip
-
-    Args:
-        data: Массив numpy float32
-
-    Returns:
-        Сжатые данные в виде bytes
-    """
-    if data is None or len(data) == 0:
-        return b''
-
-    # Конвертируем в float32 и получаем байты
-    float32_data = data.astype(np.float32)
-    byte_data = float32_data.tobytes()
-
-    # Сжимаем gzip
-    compressed = gzip.compress(byte_data, compresslevel=6)
-
-    logger.debug(f"Compressed array: {len(byte_data)} -> {len(compressed)} bytes "
-                f"(ratio: {len(compressed)/len(byte_data):.2f})")
-
-    return compressed
+    @property
+    def total_samples(self):  # type: ignore
+        return self.samples_count_total
 
 
-def decompress_float32_array(compressed_data: bytes) -> np.ndarray:
-    """
-    Распаковать сжатый массив float32
+## Сжатие/распаковка теперь централизовано в src.utils.serialization.
+## Оставляем совместимость: экспорт прежних имен для тестов, но перенаправляем.
+def compress_float32_array(data: np.ndarray):  # type: ignore
+    return dump_float32_array(data)
 
-    Args:
-        compressed_data: Сжатые данные
 
-    Returns:
-        Массив numpy float32
-    """
-    if not compressed_data:
-        return np.array([], dtype=np.float32)
-
-    # Распаковываем gzip
-    byte_data = gzip.decompress(compressed_data)
-
-    # Конвертируем обратно в numpy массив
-    float32_array = np.frombuffer(byte_data, dtype=np.float32)
-
-    return float32_array
+def decompress_float32_array(b: bytes):  # type: ignore
+    arr = load_float32_array(b)
+    return arr if arr is not None else np.array([], dtype=np.float32)
 
 
 def calculate_file_hash(file_path: Path) -> str:
@@ -314,7 +299,8 @@ class CSVLoader:
         file_path: Union[str, Path],
         equipment_id: Optional[UUID] = None,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
-        recorded_at: Optional[datetime] = None
+        recorded_at: Optional[datetime] = None,
+        metadata: Optional[Dict] = None
     ) -> CSVProcessingStats:
         """
         Загрузить CSV файл в базу данных
@@ -367,11 +353,14 @@ class CSVLoader:
 
                 # Обрабатываем файл по частям
                 async for batch_stats in self._process_csv_file_batches(
-                    file_path, equipment_id, sample_rate, recorded_at, file_hash, session
+                    file_path, equipment_id, sample_rate, recorded_at, file_hash, session, metadata or {}
                 ):
                     stats.add_batch_stats(
                         batch_stats['processed_rows'],
-                        batch_stats['nan_counts']
+                        batch_stats['nan_counts'],
+                        batch_stats.get('raw_id'),
+                        batch_stats.get('samples_count', 0),
+                        batch_stats.get('phases_present', {"R": False, "S": False, "T": False})
                     )
 
                     self.logger.info(
@@ -407,7 +396,8 @@ class CSVLoader:
         sample_rate: int,
         recorded_at: datetime,
         file_hash: str,
-        session: AsyncSession
+    session: AsyncSession,
+    metadata: Dict
     ) -> AsyncGenerator[Dict, None]:
         """
         Обработать CSV файл по пачкам
@@ -418,7 +408,7 @@ class CSVLoader:
         with open(file_path, 'r', encoding='utf-8') as csvfile:
             reader = csv.reader(csvfile)
 
-            # Читаем заголовок
+            # Читаем заголовок (первая строка одна ячейка с тремя именами)
             try:
                 header_row = next(reader)
                 if not header_row:
@@ -441,6 +431,7 @@ class CSVLoader:
             batch_size = 0
             row_number = 1  # Начинаем с 1, т.к. 0 - заголовок
 
+            corrupt_logged = 0
             for row in reader:
                 row_number += 1
 
@@ -461,15 +452,18 @@ class CSVLoader:
 
                     # Если пачка заполнена, сохраняем
                     if batch_size >= self.batch_size:
-                        await self._save_batch_to_db(
+                        raw_id, samples_count, phases_present = await self._save_batch_to_db(
                             batch_data, equipment_id, sample_rate,
-                            recorded_at, file_hash, file_path.name, session
+                            recorded_at, file_hash, file_path.name, session, metadata
                         )
 
                         # Возвращаем статистику пачки
                         yield {
                             'processed_rows': batch_size,
-                            'nan_counts': batch_nan_counts.copy()
+                            'nan_counts': batch_nan_counts.copy(),
+                            'raw_id': raw_id,
+                            'samples_count': samples_count,
+                            'phases_present': phases_present
                         }
 
                         # Очищаем пачку
@@ -478,19 +472,24 @@ class CSVLoader:
                         batch_size = 0
 
                 except Exception as e:
-                    self.logger.warning(f"Ошибка в строке {row_number}: {e}")
+                    if corrupt_logged < 100:
+                        self.logger.warning(f"Ошибка в строке {row_number}: {e}")
+                        corrupt_logged += 1
                     continue
 
             # Сохраняем оставшиеся данные
             if batch_size > 0:
-                await self._save_batch_to_db(
+                raw_id, samples_count, phases_present = await self._save_batch_to_db(
                     batch_data, equipment_id, sample_rate,
-                    recorded_at, file_hash, file_path.name, session
+                    recorded_at, file_hash, file_path.name, session, metadata
                 )
 
                 yield {
                     'processed_rows': batch_size,
-                    'nan_counts': batch_nan_counts
+                    'nan_counts': batch_nan_counts,
+                    'raw_id': raw_id,
+                    'samples_count': samples_count,
+                    'phases_present': phases_present
                 }
 
     async def _save_batch_to_db(
@@ -501,8 +500,9 @@ class CSVLoader:
         recorded_at: datetime,
         file_hash: str,
         file_name: str,
-        session: AsyncSession
-    ):
+    session: AsyncSession,
+    metadata: Dict
+    ) -> Tuple[Optional[UUID], int, Dict[str, bool]]:
         """
         Сохранить пачку данных в базу данных
 
@@ -520,20 +520,26 @@ class CSVLoader:
         samples_count = 0
 
         for phase in ['R', 'S', 'T']:
-            if batch_data[phase]:
-                arr = np.array(batch_data[phase], dtype=np.float32)
-                # Сжимаем только если есть реальные данные (не все NaN)
-                if not np.all(np.isnan(arr)):
-                    phase_arrays[phase] = compress_float32_array(arr)
-                    samples_count = max(samples_count, len(arr))
-                else:
+            data_list = batch_data[phase]
+            if data_list:
+                arr = np.array(data_list, dtype=np.float32)
+                if np.all(np.isnan(arr)):
                     phase_arrays[phase] = None
+                else:
+                    phase_arrays[phase] = dump_float32_array(arr)
+                    samples_count = max(samples_count, arr.size)
             else:
                 phase_arrays[phase] = None
 
+        phases_present = {
+            'R': phase_arrays['R'] is not None,
+            'S': phase_arrays['S'] is not None,
+            'T': phase_arrays['T'] is not None,
+        }
+
         if samples_count == 0:
             self.logger.warning("Пачка содержит только NaN значения, пропускаем")
-            return
+            return None, 0, phases_present
 
         # Создаем запись в базе данных
         raw_signal = RawSignal(
@@ -547,17 +553,19 @@ class CSVLoader:
             file_name=file_name,
             file_hash=file_hash,
             meta={
+                **(metadata or {}),
                 'batch_size': len(batch_data['R']),
                 'file_format': 'csv_single_column',
                 'phases': ['R', 'S', 'T'],
-                'loader_version': '1.0.0'
+                'loader_version': '1.1.0'
             }
         )
 
         session.add(raw_signal)
 
         # Флашим изменения, но не коммитим (это делается выше)
-        await session.flush()
+    await session.flush()
+    return raw_signal.id, samples_count, phases_present
 
 
 # Вспомогательные функции для CLI использования

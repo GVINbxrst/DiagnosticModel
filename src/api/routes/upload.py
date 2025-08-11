@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.middleware.auth import get_current_user, require_operator
 from src.api.middleware.metrics import track_file_upload, metrics
 from src.api.schemas import UploadResponse, UploadMetadata, UserInfo
-from src.data_processing.csv_loader import CSVLoader
+from src.data_processing.csv_loader import CSVLoader, InvalidCSVFormatError
 from src.database.connection import get_async_session
 from src.database.models import Equipment
 from src.worker.tasks import process_raw
@@ -110,6 +110,12 @@ async def upload_csv_file(
         # Инициализируем CSV загрузчик
         csv_loader = CSVLoader()
 
+        # Валидация первой строки (заголовок)
+        with open(temp_file_path, 'r', encoding='utf-8') as fh:
+            first_line = fh.readline().strip()
+            if first_line != 'current_R,current_S,current_T':
+                raise HTTPException(status_code=422, detail='Некорректный заголовок CSV, ожидается current_R,current_S,current_T')
+
         # Загружаем файл в базу данных
         stats = await csv_loader.load_csv_file(
             file_path=temp_file_path,
@@ -168,13 +174,20 @@ async def upload_csv_file(
             upload_time=stats.upload_time
         )
 
+    except InvalidCSVFormatError as e:
+        if 'temp_file_path' in locals():
+            try:
+                os.unlink(temp_file_path)
+            except Exception as rm_err:
+                logger.debug(f"Не удалось удалить временный файл при 422: {rm_err}")
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         # Удаляем временный файл в случае ошибки
         if 'temp_file_path' in locals():
             try:
                 os.unlink(temp_file_path)
-            except:
-                pass
+            except Exception as rm_err:
+                logger.debug(f"Не удалось удалить временный файл после ошибки: {rm_err}")
 
         # Обновляем метрики ошибок
         track_file_upload('csv', 'error', file_size)

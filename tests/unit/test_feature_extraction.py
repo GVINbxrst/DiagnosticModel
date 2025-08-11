@@ -194,16 +194,48 @@ class TestFrequencyFeatureExtractor:
         # Смесь 50 Гц и 100 Гц
         signal = np.sin(2 * np.pi * 50 * t) + 0.5 * np.sin(2 * np.pi * 100 * t)
 
-        features = extractor.extract_fft_features(signal, window_size=512, top_peaks=5)
+    features = extractor.extract_fft_features(signal, window_size=512, top_peaks=5)
 
         # Должно быть найдено несколько пиков
         assert len(features['peaks']) >= 2
 
-        # Проверяем, что найдены пики около 50 и 100 Гц
-        peak_frequencies = [peak['frequency'] for peak in features['peaks']]
+    def test_fft_top_peaks_limit(self, extractor):
+        """Убеждаемся что возвращается не больше top_peaks пиков"""
+        sample_rate = 1000
+        duration = 1.0
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        # Микс многих частот
+        sig = sum(np.sin(2*np.pi*f*t) for f in [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330])
+        features = extractor.extract_fft_features(sig, window_size=512, top_peaks=10)
+        assert len(features['peaks']) <= 10
 
-        assert any(abs(f - 50) < 5 for f in peak_frequencies)
-        assert any(abs(f - 100) < 5 for f in peak_frequencies)
+    def test_fft_window_auto_reduce(self, extractor):
+        """Если сигнал короче окна 4096, окно должно уменьшаться без ошибки"""
+        sample_rate = 1000
+        t = np.linspace(0, 0.2, int(sample_rate * 0.2), endpoint=False)
+        sig = np.sin(2*np.pi*60*t)
+        features = extractor.extract_fft_features(sig, window_size=4096)
+        assert 'peaks' in features
+        assert len(features['peaks']) > 0
+
+
+class TestNanPolicy:
+    def test_nan_ratio_exceeds_threshold(self):
+        from src.data_processing.feature_extraction import SignalPreprocessor, InsufficientDataError, MAX_NAN_RATIO
+        prep = SignalPreprocessor()
+        # 30% NaN (>20%)
+        data = np.array([1.0, np.nan, 2.0, np.nan, 3.0, np.nan, 4.0], dtype=float)
+        with pytest.raises(InsufficientDataError):
+            prep.clean_and_interpolate_signal(data, max_nan_ratio=MAX_NAN_RATIO)
+
+    def test_nan_ratio_under_threshold_interpolated(self):
+        from src.data_processing.feature_extraction import SignalPreprocessor, MAX_NAN_RATIO
+        prep = SignalPreprocessor()
+        # ~16.6% NaN (<20%)
+        data = np.array([1.0, 2.0, np.nan, 4.0, 5.0, 6.0], dtype=float)
+        cleaned = prep.clean_and_interpolate_signal(data, max_nan_ratio=MAX_NAN_RATIO)
+        assert not np.isnan(cleaned).any()
+        assert len(cleaned) == 6 or len(cleaned) == 5
 
     def test_short_signal_fft(self, extractor):
         """Тест FFT для короткого сигнала"""

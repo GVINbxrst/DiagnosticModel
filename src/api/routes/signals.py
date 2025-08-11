@@ -2,7 +2,6 @@
 Роутер для получения сигналов по фазам для визуализации
 """
 
-import gzip
 import time
 from typing import List, Optional
 from uuid import UUID
@@ -18,12 +17,14 @@ from src.api.schemas import SignalResponse, PhaseData, UserInfo, SignalListRespo
 from src.database.connection import get_async_session
 from src.database.models import RawSignal, Equipment, ProcessingStatus
 from src.utils.logger import get_logger
+from src.utils.metrics import observe_latency
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 
 @router.get("/signals/{raw_id}", response_model=SignalResponse)
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/signals/{id}'})
 async def get_signal_data(
     raw_id: UUID,
     downsample_factor: Optional[int] = Query(None, ge=1, le=100, description="Фактор прореживания данных"),
@@ -59,11 +60,18 @@ async def get_signal_data(
         # Распаковываем данные фаз
         phases = []
 
+        from src.utils.serialization import load_float32_array
         for phase_name, phase_data in [('a', raw_signal.phase_a), ('b', raw_signal.phase_b), ('c', raw_signal.phase_c)]:
             if phase_data is not None:
-                # Распаковываем сжатые данные
-                decompressed_data = gzip.decompress(phase_data)
-                values = np.frombuffer(decompressed_data, dtype=np.float32)
+                values_arr = load_float32_array(phase_data)
+                if values_arr is None:
+                    phase_info = PhaseData(
+                        phase_name=phase_name.upper(),
+                        values=[], has_data=False, samples_count=0, statistics=None
+                    )
+                    phases.append(phase_info)
+                    continue
+                values = values_arr
 
                 # Применяем фильтрацию по диапазону
                 if start_sample is not None or end_sample is not None:
@@ -136,7 +144,7 @@ async def get_signal_data(
             raw_signal_id=raw_signal.id,
             equipment_id=raw_signal.equipment_id,
             recorded_at=raw_signal.recorded_at,
-            sample_rate=raw_signal.sample_rate,
+            sample_rate=raw_signal.sample_rate_hz,
             total_samples=raw_signal.samples_count,
             phases=phases,
             metadata=metadata,
@@ -152,6 +160,7 @@ async def get_signal_data(
 
 
 @router.get("/signals", response_model=SignalListResponse)
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/signals'})
 async def list_signals(
     equipment_id: Optional[UUID] = Query(None, description="Фильтр по оборудованию"),
     status_filter: Optional[List[ProcessingStatus]] = Query(None, description="Фильтр по статусу обработки"),
@@ -258,7 +267,7 @@ async def get_signal_preview(
         preview_data = {
             'signal_id': str(raw_id),
             'equipment_id': str(raw_signal.equipment_id),
-            'sample_rate': raw_signal.sample_rate,
+            'sample_rate': raw_signal.sample_rate_hz,
             'total_samples': raw_signal.samples_count,
             'preview_samples': samples,
             'phases': {}
@@ -267,11 +276,15 @@ async def get_signal_preview(
         # Рассчитываем фактор прореживания
         downsample_factor = max(1, raw_signal.samples_count // samples)
 
+        from src.utils.serialization import load_float32_array
         for phase_name, phase_data in [('A', raw_signal.phase_a), ('B', raw_signal.phase_b), ('C', raw_signal.phase_c)]:
             if phase_data is not None:
-                # Распаковываем и прореживаем
-                decompressed_data = gzip.decompress(phase_data)
-                values = np.frombuffer(decompressed_data, dtype=np.float32)
+                values = load_float32_array(phase_data)
+                if values is None:
+                    preview_data['phases'][phase_name] = {
+                        'values': [], 'samples_count': 0, 'has_data': False
+                    }
+                    continue
 
                 # Прореживание
                 preview_values = values[::downsample_factor][:samples]
@@ -288,11 +301,7 @@ async def get_signal_preview(
                     }
                 }
             else:
-                preview_data['phases'][phase_name] = {
-                    'values': [],
-                    'samples_count': 0,
-                    'has_data': False
-                }
+                preview_data['phases'][phase_name] = {'values': [], 'samples_count': 0, 'has_data': False}
 
         return preview_data
 

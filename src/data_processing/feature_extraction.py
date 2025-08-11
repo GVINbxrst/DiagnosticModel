@@ -33,19 +33,19 @@ logger = get_logger(__name__)
 
 # Константы для обработки сигналов
 DEFAULT_SAMPLE_RATE = 25600  # Гц
-DEFAULT_WINDOW_SIZE = 1024   # Размер окна FFT
+DEFAULT_WINDOW_SIZE = 4096   # Размер окна FFT согласно контракту
 MIN_SIGNAL_LENGTH = 100      # Минимальная длина сигнала для анализа
-MAX_NAN_RATIO = 0.8         # Максимальная доля NaN для обработки
+MAX_NAN_RATIO = 0.2         # Порог доли NaN: >20% -> фаза отсутствует (не обрабатываем)
 
 
 class SignalProcessingError(Exception):
     """Базовое исключение для обработки сигналов"""
-    pass
+    ...  # Docstring уже описывает назначение
 
 
 class InsufficientDataError(SignalProcessingError):
     """Исключение для недостаточного количества данных"""
-    pass
+    ...
 
 
 class SignalPreprocessor:
@@ -81,7 +81,7 @@ class SignalPreprocessor:
 
         if nan_ratio > max_nan_ratio:
             raise InsufficientDataError(
-                f"Слишком много NaN значений: {nan_ratio:.1%} > {max_nan_ratio:.1%}"
+                f"Превышен порог NaN {nan_ratio:.1%} > {max_nan_ratio:.1%}"
             )
 
         # Если нет NaN, возвращаем как есть
@@ -98,6 +98,15 @@ class SignalPreprocessor:
 
         # Интерполируем внутренние пропуски
         signal_interpolated = self._interpolate_internal_nan(signal_trimmed)
+
+        # Медианный фильтр (окно 51) при наличии шума
+        if signal_interpolated.size >= 51:
+            from scipy.signal import medfilt
+            try:
+                filtered = medfilt(signal_interpolated, kernel_size=51)
+                signal_interpolated = filtered
+            except Exception:  # тихо игнорируем сбой фильтра, оставляем необработанным
+                self.logger.debug("Не удалось применить медианный фильтр", exc_info=True)
 
         self.logger.debug(
             f"Обработка сигнала: {len(signal_data)} -> {len(signal_interpolated)} отсчетов, "
@@ -212,8 +221,8 @@ class FrequencyFeatureExtractor:
     def extract_fft_features(
         self,
         signal_data: np.ndarray,
-        window_size: int = DEFAULT_WINDOW_SIZE,
-        top_peaks: int = 10
+    window_size: int = DEFAULT_WINDOW_SIZE,
+    top_peaks: int = 10
     ) -> Dict:
         """
         Извлечь частотные признаки с помощью FFT
@@ -516,14 +525,17 @@ class FeatureExtractor:
                 raise ValueError(f"Сырой сигнал с ID {raw_signal_id} не найден")
 
             # Распаковываем данные фаз
-            from src.data_processing.csv_loader import decompress_float32_array
+                        from src.utils.serialization import load_float32_array
 
-            phase_a = decompress_float32_array(raw_signal.phase_a) if raw_signal.phase_a else None
-            phase_b = decompress_float32_array(raw_signal.phase_b) if raw_signal.phase_b else None
-            phase_c = decompress_float32_array(raw_signal.phase_c) if raw_signal.phase_c else None
+                        phase_a = load_float32_array(raw_signal.phase_a) if raw_signal.phase_a else None
+                        phase_b = load_float32_array(raw_signal.phase_b) if raw_signal.phase_b else None
+                        phase_c = load_float32_array(raw_signal.phase_c) if raw_signal.phase_c else None
 
             # Вычисляем параметры окон
             samples_per_window = int(window_duration_ms * self.sample_rate / 1000)
+            # Принудительно приводим окно FFT к 4096 если возможно
+            if samples_per_window < 4096:
+                samples_per_window = 4096 if max(len(x) if x is not None else 0 for x in [phase_a, phase_b, phase_c]) >= 4096 else samples_per_window
             hop_size = int(samples_per_window * (1 - overlap_ratio))
 
             # Определяем максимальную длину сигнала

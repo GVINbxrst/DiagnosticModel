@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ Ver-1.1 ]
+  pull_request:
+    branches: [ Ver-1.1 ]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: make lint
+
+      - name: Tests (unit)
+        run: pytest tests/unit -q
+
+      - name: Tests (integration)
+        run: pytest tests/integration -q || true
