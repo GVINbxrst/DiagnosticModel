@@ -40,12 +40,12 @@ MAX_NAN_RATIO = 0.2         # Порог доли NaN: >20% -> фаза отсу
 
 class SignalProcessingError(Exception):
     """Базовое исключение для обработки сигналов"""
-    ...  # Docstring уже описывает назначение
+    pass
 
 
 class InsufficientDataError(SignalProcessingError):
     """Исключение для недостаточного количества данных"""
-    ...
+    pass
 
 
 class SignalPreprocessor:

@@ -161,6 +161,50 @@ class TestFeaturePreprocessor:
             preprocessor.prepare_features_for_training(df)
 
 
+@pytest.mark.asyncio
+async def test_mvp_train_isolation_forest(monkeypatch, tmp_path):
+    """MVP тест функции train_isolation_forest: создаём временную таблицу и обучаем модель."""
+    from sqlalchemy import text
+    from src.database.connection import engine
+    from src.ml.train import train_isolation_forest
+    from src.ml import train as train_module
+
+    # Перенастраиваем каталог моделей
+    monkeypatch.setattr(train_module.settings, 'models_path', tmp_path)
+
+    DDL = """
+    CREATE TABLE IF NOT EXISTS feature (
+        id UUID PRIMARY KEY,
+        rms_a DOUBLE PRECISION,
+        crest_a DOUBLE PRECISION,
+        kurt_a DOUBLE PRECISION,
+        skew_a DOUBLE PRECISION,
+        mean_a DOUBLE PRECISION,
+        std_a DOUBLE PRECISION,
+        min_a DOUBLE PRECISION,
+        max_a DOUBLE PRECISION
+    );
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text(DDL))
+        # Вставляем >100 строк (порог MIN_SAMPLES_FOR_TRAINING не используется здесь, но дадим 120)
+        for _ in range(120):
+            await conn.execute(text("INSERT INTO feature (id, rms_a, crest_a, kurt_a, skew_a, mean_a, std_a, min_a, max_a) VALUES (:id,:r,:c,:k,:s,:m,:st,:mn,:mx)"), {
+                'id': str(uuid4()),
+                'r': float(np.random.normal(10,2)),
+                'c': float(np.random.normal(3,0.5)),
+                'k': float(np.random.normal(0,1)),
+                's': float(np.random.normal(0,1)),
+                'm': float(np.random.normal(10,2)),
+                'st': float(abs(np.random.normal(2,0.3))),
+                'mn': float(np.random.normal(5,1)),
+                'mx': float(np.random.normal(15,1)),
+            })
+
+    model_path = await train_isolation_forest(output_path=str(tmp_path))
+    assert model_path.exists()
+
+
 class TestAnomalyDetectionModels:
     """Тесты моделей обнаружения аномалий"""
 

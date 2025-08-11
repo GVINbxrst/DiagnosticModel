@@ -12,12 +12,14 @@ from src.api.schemas import LoginRequest, TokenResponse, RefreshTokenRequest, Us
 from src.database.connection import get_async_session
 from src.database.models import User
 from src.utils.logger import get_logger
+from src.utils.metrics import observe_latency
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 
 @router.post("/login", response_model=TokenResponse)
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/login'})
 async def login(
     credentials: LoginRequest,
     request: Request,
@@ -72,6 +74,7 @@ async def login(
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/refresh'})
 async def refresh_token(
     refresh_request: RefreshTokenRequest,
     request: Request
@@ -98,6 +101,7 @@ async def refresh_token(
 
 
 @router.post("/logout")
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/logout'})
 async def logout(
     request: Request,
     current_user: UserInfo = Depends(get_current_user)
@@ -134,6 +138,7 @@ async def logout(
 
 
 @router.get("/me", response_model=UserInfo)
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/me'})
 async def get_current_user_info(
     current_user: UserInfo = Depends(get_current_user)
 ):
@@ -142,6 +147,7 @@ async def get_current_user_info(
 
 
 @router.post("/revoke-session")
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/revoke-session'})
 async def revoke_session(
     session_id: str,
     request: Request,

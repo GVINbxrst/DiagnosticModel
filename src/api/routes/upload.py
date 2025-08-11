@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.auth import get_current_user, require_operator
 from src.api.middleware.metrics import track_file_upload, metrics
+from src.utils.metrics import observe_latency
 from src.api.schemas import UploadResponse, UploadMetadata, UserInfo
 from src.data_processing.csv_loader import CSVLoader, InvalidCSVFormatError
 from src.database.connection import get_async_session
@@ -25,6 +26,7 @@ logger = get_logger(__name__)
 
 
 @router.post("/upload", response_model=UploadResponse)
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/upload'})
 async def upload_csv_file(
     file: UploadFile = File(..., description="CSV файл с токовыми с��гналами"),
     equipment_id: Optional[str] = Form(None, description="ID оборудования (UUID)"),

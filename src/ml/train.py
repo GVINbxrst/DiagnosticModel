@@ -54,6 +54,92 @@ class InsufficientDataError(AnomalyModelError):
     pass
 
 
+# === Minimal MVP function required by contract ===
+async def train_isolation_forest(output_path: Optional[str] = None, n_estimators: int = 100) -> Path:
+    """MVP обучение IsolationForest и сохранение модели.
+
+    Шаги (упрощённо):
+      1. Загружаем признаки (таблица Feature) – только статистика RMS/crest/kurt/skew/mean/std/min/max.
+      2. Заполняем NaN медианами; если колонка полностью NaN – отбрасываем.
+      3. Масштабируем StandardScaler.
+      4. Обучаем IsolationForest(random_state=42, n_estimators=n_estimators).
+      5. Сохраняем модель и scaler в models/anomaly/isolation_forest_v1.pkl (joblib).
+      6. Обновляем/создаём models/manifest.json (append/update entry).
+
+    Возвращает путь к pkl файлу. Без сложной стратификации и визуализаций.
+    """
+    model_dir = Path(output_path) if output_path else (settings.models_path / 'anomaly')
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    stat_cols = [
+        'rms_a','rms_b','rms_c',
+        'crest_a','crest_b','crest_c',
+        'kurt_a','kurt_b','kurt_c',
+        'skew_a','skew_b','skew_c',
+        'mean_a','mean_b','mean_c',
+        'std_a','std_b','std_c',
+        'min_a','min_b','min_c',
+        'max_a','max_b','max_c'
+    ]
+
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(Feature))
+        rows = result.scalars().all()
+
+    if not rows:
+        raise InsufficientDataError("Нет данных Feature для обучения")
+
+    # Формируем DataFrame
+    import pandas as pd
+    records = []
+    for r in rows:
+        rec = {c: getattr(r, c, None) for c in stat_cols}
+        records.append(rec)
+    df = pd.DataFrame(records)
+
+    # Отбрасываем пустые колонки
+    non_empty = [c for c in stat_cols if c in df.columns and not df[c].isna().all()]
+    if not non_empty:
+        raise InsufficientDataError("Все статистические признаки пусты")
+    df = df[non_empty]
+
+    # Заполняем NaN медианами
+    df = df.fillna(df.median()).fillna(0)
+
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.ensemble import IsolationForest
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df.values)
+
+    model = IsolationForest(n_estimators=n_estimators, random_state=42, contamination='auto')
+    model.fit(X)
+
+    # Сохраняем
+    import joblib, json
+    model_path = model_dir / 'isolation_forest_v1.pkl'
+    joblib.dump({'model': model, 'scaler': scaler, 'features': non_empty}, model_path, compress=3)
+
+    manifest_path = model_dir / 'manifest.json'
+    manifest = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except Exception:
+            manifest = {}
+    manifest['isolation_forest_v1'] = {
+        'path': str(model_path),
+        'n_features': len(non_empty),
+        'n_estimators': n_estimators,
+        'updated_at': datetime.utcnow().isoformat()
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
+
+    logger.info(f"IsolationForest модель сохранена: {model_path}")
+    return model_path
+
+
 class FeaturePreprocessor:
     """Предобработчик признаков для ML моделей"""
 

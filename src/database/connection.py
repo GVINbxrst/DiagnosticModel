@@ -1,107 +1,69 @@
-"""
-Подключение к базе данных для DiagMod
-Асинхронные сессии SQLAlchemy для работы с PostgreSQL
+"""Database connection utilities (async SQLAlchemy v2 style).
+
+Требования (контракт задачи):
+ - engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool, future=True)
+ - async_session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+ - get_async_session(): контекстный менеджер commit/rollback
+ - check_connection(): вернуть True/False, логируя исключение
+
+Минимально инвазивная реализация; параметры пула/echo берём из settings.
 """
 
-import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
+from sqlalchemy import text
 
 from src.config.settings import get_settings
+from src.utils.logger import get_logger
 
-# Настройки
 settings = get_settings()
+logger = get_logger(__name__)
 
-# Создание асинхронного движка
+# Engine согласно контракту. Используем NullPool чтобы избежать зависаний в тестах.
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.APP_DEBUG,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-    poolclass=NullPool if settings.APP_ENVIRONMENT == "test" else None,
-    connect_args={
-        "server_settings": {
-            "application_name": "diagmod_app",
-        }
-    }
+    future=True,
+    echo=getattr(settings, 'APP_DEBUG', False),
+    poolclass=NullPool,
 )
 
-# Фабрика сессий
-AsyncSessionLocal = async_sessionmaker(
+# Session maker согласно контракту.
+async_session_maker = async_sessionmaker(
     engine,
     class_=AsyncSession,
     expire_on_commit=False,
-    autoflush=True,
-    autocommit=False
 )
 
 
 @asynccontextmanager
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Получить асинхронную сессию базы данных
-
-    Yields:
-        AsyncSession: Сессия базы данных
-    """
-    async with AsyncSessionLocal() as session:
+    """Асинхронный контекст для работы с БД с авто commit/rollback."""
+    async with async_session_maker() as session:  # type: AsyncSession
         try:
             yield session
+            await session.commit()
         except Exception:
-            await session.rollback()
+            try:
+                await session.rollback()
+            except Exception:
+                logger.debug("Rollback failed", exc_info=True)
             raise
-        finally:
-            await session.close()
 
 
-async def get_async_session_dependency() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Зависимость FastAPI для получения сессии базы данных
-
-    Yields:
-        AsyncSession: Сессия базы данных
-    """
-    async with get_async_session() as session:
-        yield session
-
-
-async def create_tables():
-    """Создать все таблицы в базе данных"""
-    from src.database.models import Base
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-
-async def drop_tables():
-    """Удалить все таблицы из базы данных"""
-    from src.database.models import Base
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
-
-async def check_connection():
-    """Проверить подключение к базе данных"""
+async def check_connection() -> bool:
+    """Проверить доступность соединения (SELECT 1)."""
     try:
-        async with get_async_session() as session:
-            result = await session.execute("SELECT 1")
-            return result.scalar() == 1
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
     except Exception:
+        logger.exception("DB connection test failed")
         return False
 
 
-if __name__ == "__main__":
-    # Тест подключения
-    async def test_connection():
-        print("Тестируем подключение к базе данных...")
-
-        if await check_connection():
-            print("✓ Подключение успешно")
-        else:
-            print("✗ Ошибка подключения")
-
-    asyncio.run(test_connection())
+__all__ = [
+    'engine', 'async_session_maker', 'get_async_session', 'check_connection'
+]

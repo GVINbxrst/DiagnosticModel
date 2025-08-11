@@ -42,12 +42,12 @@ EXPECTED_HEADER_PATTERN = ['current_R', 'current_S', 'current_T']
 
 class CSVLoaderError(Exception):
     """Базовое исключение для CSV Loader"""
-    ...  # Docstring достаточен
+    pass
 
 
 class InvalidCSVFormatError(CSVLoaderError):
     """Исключение для некорректного формата CSV"""
-    ...
+    pass
 
 
 class CSVProcessingStats:

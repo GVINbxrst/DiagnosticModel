@@ -157,6 +157,7 @@ async def compress_and_store_results(data: Any) -> bytes:
         raise
 
 
+@_observe_latency('worker_task_duration_seconds', labels={'task_name':'process_raw'})
 @celery_app.task(
     bind=True,
     base=DatabaseTask,
@@ -181,14 +182,7 @@ def process_raw(self, raw_id: str) -> Dict:
     try:
         # Запускаем асинхронную обработку
         # Измеряем через observe_latency вручную (Celery не async)
-        latency_start = time.time()
-        result = asyncio.run(_process_raw_async(raw_id))
-        duration = time.time() - latency_start
-        try:
-            from src.utils.metrics import worker_task_duration_seconds
-            worker_task_duration_seconds.labels(task_name='process_raw').observe(duration)
-        except Exception as metrics_exc:
-            self.logger.debug(f"Не удалось записать метрику длительности: {metrics_exc}")
+    result = asyncio.run(_process_raw_async(raw_id))
 
         processing_time = (datetime.utcnow() - task_start).total_seconds()
         result['processing_time_seconds'] = processing_time
@@ -304,6 +298,7 @@ async def _update_signal_status(
         await session.commit()
 
 
+@_observe_latency('worker_task_duration_seconds', labels={'task_name':'detect_anomalies'})
 @celery_app.task(
     bind=True,
     base=DatabaseTask,
@@ -505,6 +500,7 @@ async def load_latest_models_async():
         return {}
 
 
+@_observe_latency('worker_task_duration_seconds', labels={'task_name':'forecast_trend'})
 @celery_app.task(
     bind=True,
     base=DatabaseTask,
@@ -609,6 +605,7 @@ async def _forecast_trend_async(equipment_id: str) -> Dict:
 
 # Дополнительные служебные задачи
 
+@_observe_latency('worker_task_duration_seconds', labels={'task_name':'cleanup_old_data'})
 @celery_app.task(bind=True, base=DatabaseTask)
 def cleanup_old_data(self, days_to_keep: int = 30) -> Dict:
     """
@@ -673,6 +670,7 @@ async def _cleanup_old_data_async(days_to_keep: int) -> Dict:
     }
 
 
+@_observe_latency('worker_task_duration_seconds', labels={'task_name':'retrain_models'})
 @celery_app.task(bind=True, base=DatabaseTask)
 def retrain_models(self) -> Dict:
     """Переобучение моделей на новых данных"""

@@ -17,12 +17,14 @@ from src.api.middleware.security import (
 from src.api.schemas import UserInfo
 from src.database.connection import get_async_session
 from src.utils.logger import get_logger
+from src.utils.metrics import observe_latency
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 
 @router.get("/audit-logs")
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/audit-logs'})
 async def get_audit_logs(
     request: Request,
     start_date: Optional[datetime] = Query(None, description="Начальная дата"),
@@ -151,6 +153,7 @@ async def get_audit_logs(
 
 
 @router.get("/audit-summary")
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/audit-summary'})
 async def get_audit_summary(
     request: Request,
     hours_back: int = Query(24, ge=1, le=168, description="Часов назад (макс. 7 дней)"),
@@ -266,6 +269,7 @@ async def get_audit_summary(
 
 
 @router.get("/suspicious-activity")
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/suspicious-activity'})
 async def get_suspicious_activity(
     request: Request,
     current_user: UserInfo = Depends(require_admin),
@@ -307,6 +311,7 @@ async def get_suspicious_activity(
 
 
 @router.get("/active-sessions")
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/active-sessions'})
 async def get_active_sessions(
     request: Request,
     current_user: UserInfo = Depends(require_admin),
@@ -358,6 +363,7 @@ async def get_active_sessions(
 
 
 @router.post("/revoke-user-sessions/{user_id}")
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/revoke-user-sessions/{id}'})
 async def revoke_user_sessions(
     user_id: UUID,
     request: Request,
@@ -415,6 +421,7 @@ async def revoke_user_sessions(
 
 
 @router.post("/cleanup-expired-sessions")
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/cleanup-expired-sessions'})
 async def cleanup_expired_sessions(
     request: Request,
     current_user: UserInfo = Depends(require_admin)
@@ -440,6 +447,7 @@ async def cleanup_expired_sessions(
 
 
 @router.get("/security-metrics")
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/security-metrics'})
 async def get_security_metrics(
     request: Request,
     current_user: UserInfo = Depends(require_admin),

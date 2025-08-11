@@ -21,12 +21,14 @@ from src.api.schemas import (
 from src.database.connection import get_async_session
 from src.database.models import Equipment, Prediction, Feature, RawSignal
 from src.utils.logger import get_logger
+from src.utils.metrics import observe_latency
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 
 @router.get("/anomalies/{equipment_id}", response_model=AnomaliesResponse)
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/anomalies/{id}'})
 async def get_equipment_anomalies(
     equipment_id: UUID,
     start_date: Optional[datetime] = Query(None, description="Начальная дата фильтра"),
@@ -160,12 +162,7 @@ async def get_equipment_anomalies(
 
     processing_time = time.time() - start_time
 
-    # Обновляем метрики
-    metrics.observe_histogram(
-        'api_request_duration_seconds',
-        processing_time,
-        {'method': 'GET', 'endpoint': '/anomalies/{id}'}
-    )
+    # Метрика времени запроса теперь собирается декоратором observe_latency
 
     logger.info(
         f"Запрос аномалий для оборудования {equipment_id} выполнен за {processing_time:.3f}s",
@@ -279,6 +276,7 @@ async def _calculate_anomaly_summary(
 
 
 @router.get("/anomalies/{equipment_id}/forecast")
+@observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/anomalies/{id}/forecast'})
 async def get_equipment_forecast(
     equipment_id: UUID,
     current_user: UserInfo = Depends(require_any_role),
@@ -316,6 +314,7 @@ async def get_equipment_forecast(
 
 
 @router.post("/anomalies/{equipment_id}/reanalyze")
+@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/anomalies/{id}/reanalyze'})
 async def reanalyze_equipment(
     equipment_id: UUID,
     current_user: UserInfo = Depends(require_any_role),

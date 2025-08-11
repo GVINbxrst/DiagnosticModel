@@ -202,6 +202,50 @@ def increment(metric_name: str, labels: Optional[Dict[str, str]] = None):
     else:
         metric.inc()
 
+# --- Public wrapper API (контракт) ---
+
+def increment_counter(name: str, labels: Optional[Dict[str, str]] = None):
+    """Alias для increment по контракту задачи."""
+    increment(name, labels)
+
+
+def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    metric = globals().get(name)
+    if metric is None:
+        logger.warning(f"Метрика {name} не найдена для observe_histogram")
+        return
+    try:
+        if labels and getattr(metric, 'labels', None):
+            metric.labels(**labels).observe(value)
+        else:
+            metric.observe(value)
+    except Exception as e:  # noqa
+        logger.debug(f"Не удалось observe {name}: {e}")
+
+
+def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    metric = globals().get(name)
+    if metric is None:
+        logger.warning(f"Метрика {name} не найдена для set_gauge")
+        return
+    try:
+        if labels and getattr(metric, 'labels', None):
+            metric.labels(**labels).set(value)
+        else:
+            metric.set(value)
+    except Exception as e:
+        logger.debug(f"Не удалось set {name}: {e}")
+
+
+def get_metrics() -> bytes:
+    """Вернуть сериализованные метрики."""
+    from prometheus_client import generate_latest  # локальный импорт
+    return generate_latest(REGISTRY)
+
+
+def get_all_metrics() -> bytes:  # совместимость с существующим импортом
+    return get_metrics()
+
 
 def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
     """Декоратор измерения времени выполнения и записи в Histogram.
@@ -276,7 +320,7 @@ def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
 
 
 __all__ = [
-    'increment', 'observe_latency'
+    'increment', 'increment_counter', 'observe_histogram', 'set_gauge', 'get_metrics', 'get_all_metrics', 'observe_latency'
 ]
             # Память
             memory = psutil.virtual_memory()

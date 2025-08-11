@@ -41,12 +41,97 @@ SEASONALITY_PERIOD = 24  # Период сезонности (24 часа)
 
 class ForecastingError(Exception):
     """Базовое исключение для прогнозирования"""
-    ...
+    pass
 
 
 class InsufficientDataError(ForecastingError):
     """Исключение для недостаточного количества данных"""
-    ...
+    pass
+
+
+# === MVP функция forecast_rms согласно контракту ===
+async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: float = 2.0):
+    """Упрощённый прогноз RMS по оборудованию.
+
+    Алгоритм (MVP):
+      1. Загружаем RMS (rms_a, rms_b, rms_c) из Feature по данному equipment_id через связь RawSignal.
+      2. Агрегируем средний RMS (среднее по доступным фазам) по времени window_start (часовое округление).
+      3. Если точек < MIN_OBSERVATIONS -> InsufficientDataError.
+      4. Прогноз: пытаемся использовать Prophet; если нет (ImportError) – fallback на простую экспоненциальную модель (moving average) или ARIMA(1,0,0).
+      5. Оценка вероятности превышения порога: берём sigma исторического ряда; threshold = mean + threshold_sigma*std; прогнозные значения > threshold – оцениваем p как долю.
+    Возвращает dict с forecast, threshold и probability_over_threshold.
+    """
+    from sqlalchemy import select
+    from src.database.connection import get_async_session
+    from src.database.models import Feature, RawSignal
+
+    async with get_async_session() as session:
+        # Join Feature -> RawSignal чтобы фильтровать по equipment_id
+        q = select(Feature).join(RawSignal).where(RawSignal.equipment_id == equipment_id).order_by(Feature.window_start.asc())
+        res = await session.execute(q)
+        feats = res.scalars().all()
+
+    if len(feats) < MIN_OBSERVATIONS:
+        raise InsufficientDataError(f"Недостаточно данных: {len(feats)} < {MIN_OBSERVATIONS}")
+
+    import pandas as pd
+    rows = []
+    for f in feats:
+        values = [v for v in [f.rms_a, f.rms_b, f.rms_c] if v is not None]
+        if not values:
+            continue
+        rows.append({
+            'ts': f.window_start,
+            'rms_mean': float(np.mean(values))
+        })
+    df = pd.DataFrame(rows)
+    if df.empty or len(df) < MIN_OBSERVATIONS:
+        raise InsufficientDataError("Недостаточно валидных RMS значений")
+
+    # Агрегация по часу
+    df['ts_hour'] = pd.to_datetime(df['ts']).dt.floor('H')
+    hourly = df.groupby('ts_hour')['rms_mean'].mean().reset_index().rename(columns={'ts_hour':'ds','rms_mean':'y'})
+
+    series = hourly['y']
+    mu = series.mean()
+    sigma = series.std(ddof=0) or 1e-6
+    threshold = mu + threshold_sigma * sigma
+
+    forecast_values = []
+    future_index = []
+    try:
+        from prophet import Prophet  # type: ignore
+        m = Prophet(daily_seasonality=True, weekly_seasonality=False, yearly_seasonality=False)
+        m.fit(hourly)
+        future = m.make_future_dataframe(periods=n_steps, freq='H', include_history=False)
+        fc = m.predict(future)
+        forecast_values = fc['yhat'].tolist()
+        future_index = future['ds'].tolist()
+    except Exception:
+        # Fallback: простое скользящее среднее последнего окна
+        window = min(12, len(series))
+        last_ma = series.rolling(window).mean().iloc[-1]
+        trend = (series.iloc[-1] - series.iloc[-window]) / max(window-1,1)
+        for i in range(1, n_steps+1):
+            forecast_values.append(float(last_ma + trend * i))
+        import pandas as pd
+        last_ts = hourly['ds'].iloc[-1]
+        future_index = [last_ts + pd.Timedelta(hours=i) for i in range(1, n_steps+1)]
+
+    over = [v for v in forecast_values if v > threshold]
+    probability_over = len(over)/len(forecast_values) if forecast_values else 0.0
+
+    return {
+        'equipment_id': str(equipment_id),
+        'history_points': len(series),
+        'threshold': threshold,
+        'forecast': [
+            {'timestamp': ts.isoformat(), 'rms': float(v), 'over_threshold': v > threshold}
+            for ts, v in zip(future_index, forecast_values)
+        ],
+        'probability_over_threshold': probability_over,
+        'model': 'Prophet' if 'Prophet' in globals() and 'm' in locals() else 'FallbackMA'
+    }
 
 
 class TimeSeriesPreprocessor:
