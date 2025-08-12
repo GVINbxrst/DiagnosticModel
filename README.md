@@ -73,6 +73,34 @@ make extract-features
 
 # Обучение моделей
 make train-models
+
+### Загрузка локальных CSV через Docker
+
+Для удобной загрузки локальных CSV-файлов из вашей файловой системы в БД используйте сервис `loader` из `docker-compose.dev.yml`.
+
+1) Поднимите Postgres и Redis:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d postgres redis
+```
+
+2) Загрузка одного файла:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm loader \
+     python src/data_processing/csv_loader.py /data/csvs/sample.csv --sample-rate 25600
+```
+
+3) Загрузка всех файлов из директории:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm loader \
+     python src/data_processing/csv_loader.py /data/csvs --sample-rate 25600 --batch-size 10000
+```
+
+Примечания:
+- В `docker-compose.dev.yml` сервис `loader` монтирует локальную директорию с CSV в `/data/csvs` контейнера (путь слева в volume замените на абсолютный путь к вашей папке CSV).
+- `DATABASE_URL` и `REDIS_URL` берутся из конфига dev-компоуз; сервис пишет напрямую в Postgres из состава `docker-compose.dev.yml`.
 ```
 
 ### API примеры

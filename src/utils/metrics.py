@@ -21,15 +21,15 @@ logger = logging.getLogger(__name__)
 
 REGISTRY = CollectorRegistry()
 # --- Минимальные публичные API ---
-def increment_counter(name: str, labels: Optional[Dict[str, str]] = None):
+def increment_counter(name: str, labels: Optional[Dict[str, str]] = None, value: float = 1.0):
     metric = globals().get(name)
     if metric is None:
         logger.warning(f"Метрика {name} не найдена для increment_counter")
         return
     if labels:
-        metric.labels(**labels).inc()
+    metric.labels(**labels).inc(value)
     else:
-        metric.inc()
+    metric.inc(value)
 
 def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None):
     metric = globals().get(name)
@@ -40,6 +40,37 @@ def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] 
         metric.labels(**labels).observe(value)
     else:
         metric.observe(value)
+
+def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    """Установить значение gauge по имени метрики."""
+    metric = globals().get(name)
+    if metric is None:
+        logger.warning(f"Метрика {name} не найдена для set_gauge")
+        return
+    try:
+        if labels:
+            metric.labels(**labels).set(value)
+        else:
+            metric.set(value)
+    except Exception as e:
+        logger.warning(f"Ошибка при установке gauge {name}: {e}")
+
+def increment(name: str, labels: Optional[Dict[str, str]] = None):
+    """Alias для increment_counter для совместимости с тестами."""
+    return increment_counter(name, labels)
+
+def observe(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    """Alias для observe_histogram (совместимость)."""
+    return observe_histogram(name, value, labels)
+
+def track_worker_task(task_name: str, status: str, duration: Optional[float] = None):
+    """Утилита-совместимость для учета метрик задач воркера."""
+    try:
+        increment_counter('worker_tasks_total', {'task_name': task_name, 'status': status})
+        if duration is not None:
+            observe_histogram('worker_task_duration_seconds', duration, {'task_name': task_name})
+    except Exception as e:
+        logger.debug(f"Не удалось трекать метрики задачи {task_name}: {e}")
 
 def get_metrics() -> bytes:
     return generate_latest(REGISTRY)
@@ -75,6 +106,30 @@ def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
                         metric.observe(duration)
         return async_wrapper if is_coroutine else sync_wrapper
     return decorator
+
+
+def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    """Установить значение gauge метрики."""
+    metric = globals().get(name)
+    if metric is None:
+        logger.warning(f"Метрика {name} не найдена для set_gauge")
+        return
+    try:
+        if labels:
+            metric.labels(**labels).set(value)
+        else:
+            metric.set(value)
+    except Exception as e:
+        logger.debug(f"Не удалось установить gauge {name}: {e}")
+
+
+def track_worker_task(task_name: str, status: str, duration_seconds: float):
+    """Хелпер для задач воркера: обновить счетчик и гистограмму по задаче."""
+    try:
+        worker_tasks_total.labels(task_name=task_name, status=status).inc()
+        worker_task_duration_seconds.labels(task_name=task_name).observe(duration_seconds)
+    except Exception as e:
+        logger.debug(f"Не удалось обновить метрики воркера {task_name}: {e}")
 
 # Основные метрики для API
 api_requests_total = Counter(
@@ -147,6 +202,23 @@ data_points_processed_total = Counter(
     registry=REGISTRY
 )
 
+# Метрики пачек CSV
+csv_batch_rows = Histogram(
+    'csv_batch_rows',
+    'Размер обработанных пачек CSV (в строках)',
+    ['equipment_id'],
+    buckets=[100, 500, 1000, 5000, 10000, 20000],
+    registry=REGISTRY
+)
+
+csv_batch_duration_seconds = Histogram(
+    'csv_batch_duration_seconds',
+    'Время обработки одной пачки CSV (секунды)',
+    ['equipment_id'],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+    registry=REGISTRY
+)
+
 # Метрики для Celery Worker
 worker_tasks_total = Counter(
     'worker_tasks_total',
@@ -214,471 +286,70 @@ app_info = Info(
 
 
 class MetricsCollector:
-    """Коллектор метрик для централизованного управления"""
+    """Коллектор и точка доступа к системным метрикам."""
 
     def __init__(self):
         self.start_time = time.time()
-        self._update_app_info()
-        self._start_system_metrics_collection()
+        self.update_app_info()
 
-    def _update_app_info(self):
-        """Обновление информационных метрик приложения"""
+    def update_app_info(self):
         app_info.info({
             'version': '1.0.0',
-            'environment': 'production',
+            'environment': 'development',
             'started_at': datetime.now().isoformat()
         })
 
-    def _start_system_metrics_collection(self):
-        """Начало сбора системных метрик"""
-    # Эти метрики будут обновляться периодически (внешним планировщиком / background task)
-    return None
-
     def update_system_metrics(self):
-        """Обновление системных метрик"""
+        """Обновить базовые системные метрики (CPU/Memory/Disk)."""
         try:
-            # CPU метрики
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = psutil.cpu_percent(interval=0.1)
             system_cpu_usage_percent.set(cpu_percent)
 
-    # --- Унифицированные утилиты ---
+            mem = psutil.virtual_memory()
+            system_memory_usage_bytes.labels(type='used').set(mem.used)
+            system_memory_usage_bytes.labels(type='available').set(mem.available)
+            system_memory_usage_bytes.labels(type='total').set(mem.total)
 
-def increment(metric_name: str, labels: Optional[Dict[str, str]] = None):
-    """Увеличить Counter по имени.
-    Пример: increment('api_requests_total', {'method':'GET','endpoint':'/signals','status_code':'200','user_role':'engineer'})
-    """
-    metric = globals().get(metric_name)
-    if metric is None:
-        logger.warning(f"Метрика {metric_name} не найдена для increment")
-        return
-    if labels:
-        metric.labels(**labels).inc()
-    else:
-        metric.inc()
-
-# --- Public wrapper API (контракт) ---
-
-def increment_counter(name: str, labels: Optional[Dict[str, str]] = None):
-    """Alias для increment по контракту задачи."""
-    increment(name, labels)
-
-
-def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    metric = globals().get(name)
-    if metric is None:
-        logger.warning(f"Метрика {name} не найдена для observe_histogram")
-        return
-    try:
-        if labels and getattr(metric, 'labels', None):
-            metric.labels(**labels).observe(value)
-        else:
-            metric.observe(value)
-    except Exception as e:  # noqa
-        logger.debug(f"Не удалось observe {name}: {e}")
-
-
-def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    metric = globals().get(name)
-    if metric is None:
-        logger.warning(f"Метрика {name} не найдена для set_gauge")
-        return
-    try:
-        if labels and getattr(metric, 'labels', None):
-            metric.labels(**labels).set(value)
-        else:
-            metric.set(value)
-    except Exception as e:
-        logger.debug(f"Не удалось set {name}: {e}")
-
-
-def get_metrics() -> bytes:
-    """Вернуть сериализованные метрики."""
-    from prometheus_client import generate_latest  # локальный импорт
-    return generate_latest(REGISTRY)
-
-
-def get_all_metrics() -> bytes:  # совместимость с существующим импортом
-    return get_metrics()
-
-
-def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
-    """Декоратор измерения времени выполнения и записи в Histogram.
-
-    Если переданы labels – используются они, иначе выполняется попытка авто-лейблинга.
-    """
-    def decorator(func: Callable):
-        is_coroutine = asyncio.iscoroutinefunction(func) if 'asyncio' in globals() else hasattr(func, '__await__')
-
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            start = time.time()
-            try:
-                return func(*args, **kwargs)
-            finally:
-                duration = time.time() - start
-                hist = globals().get(metric_name)
-                if hist is not None:
-                    try:
-                        if labels:
-                            hist.labels(**labels).observe(duration) if getattr(hist, '_labelnames', None) else hist.observe(duration)
-                        else:
-                            endpoint = kwargs.get('endpoint') or getattr(func, '__name__', 'unknown')
-                            if hasattr(hist, 'labels') and hist._labelnames:  # type: ignore
-                                labelnames = list(hist._labelnames)  # type: ignore
-                                values = {}
-                                for ln in labelnames:
-                                    if ln == 'endpoint':
-                                        values[ln] = endpoint
-                                    elif ln == 'method':
-                                        values[ln] = kwargs.get('method', 'AUTO')
-                                    else:
-                                        values[ln] = 'auto'
-                                hist.labels(**values).observe(duration)
-                            else:
-                                hist.observe(duration)
-                    except Exception as e:  # noqa
-                        logger.debug(f"Не удалось записать latency в {metric_name}: {e}")
-
-        async def async_wrapper(*args, **kwargs):  # type: ignore
-            start = time.time()
-            try:
-                return await func(*args, **kwargs)
-            finally:
-                duration = time.time() - start
-                hist = globals().get(metric_name)
-                if hist is not None:
-                    try:
-                        if labels:
-                            hist.labels(**labels).observe(duration) if getattr(hist, '_labelnames', None) else hist.observe(duration)
-                        else:
-                            endpoint = kwargs.get('endpoint') or getattr(func, '__name__', 'unknown')
-                            if hasattr(hist, 'labels') and getattr(hist, '_labelnames', None):  # type: ignore
-                                labelnames = list(hist._labelnames)  # type: ignore
-                                values = {}
-                                for ln in labelnames:
-                                    if ln == 'endpoint':
-                                        values[ln] = endpoint
-                                    elif ln == 'method':
-                                        values[ln] = kwargs.get('method', 'AUTO')
-                                    else:
-                                        values[ln] = 'auto'
-                                hist.labels(**values).observe(duration)
-                            else:
-                                hist.observe(duration)
-                    except Exception as e:  # noqa
-                        logger.debug(f"Не удалось записать latency в {metric_name}: {e}")
-
-        return async_wrapper if is_coroutine else sync_wrapper
-
-    return decorator
-
-
-__all__ = [
-    'increment', 'increment_counter', 'observe_histogram', 'set_gauge', 'get_metrics', 'get_all_metrics', 'observe_latency'
-]
-            # Память
-            memory = psutil.virtual_memory()
-            system_memory_usage_bytes.labels(type='used').set(memory.used)
-            system_memory_usage_bytes.labels(type='available').set(memory.available)
-            system_memory_usage_bytes.labels(type='total').set(memory.total)
-
-            # Диск
             disk = psutil.disk_usage('/')
             system_disk_usage_bytes.labels(path='/', type='used').set(disk.used)
             system_disk_usage_bytes.labels(path='/', type='free').set(disk.free)
             system_disk_usage_bytes.labels(path='/', type='total').set(disk.total)
-
         except Exception as e:
-            logger.error(f"Ошибка при обновлении системных метрик: {e}")
+            logger.debug(f"Не удалось обновить системные метрики: {e}")
 
-    def get_metrics(self) -> str:
-        """Получение всех метрик в формате Prometheus"""
-        self.update_system_metrics()
+    def get_metrics(self) -> bytes:
+        """Вернуть все метрики в формате Prometheus."""
         return generate_latest(REGISTRY)
 
+    # --- Унифицированные утилиты ---
 
-# Глобальный коллектор метрик
 metrics_collector = MetricsCollector()
 
 
-def track_api_request(method: str, endpoint: str, user_role: str = 'unknown'):
-    """Декоратор для отслеживания API запросов"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            start_time = time.time()
-            status_code = 500  # По умолчанию ошибка
-
-            try:
-                result = await func(*args, **kwargs)
-                status_code = getattr(result, 'status_code', 200)
-                return result
-            except Exception as e:
-                status_code = 500
-                raise
-            finally:
-                duration = time.time() - start_time
-
-                # Обновляем метрики
-                api_requests_total.labels(
-                    method=method,
-                    endpoint=endpoint,
-                    status_code=str(status_code),
-                    user_role=user_role
-                ).inc()
-
-                api_request_duration_seconds.labels(
-                    method=method,
-                    endpoint=endpoint
-                ).observe(duration)
-
-        return wrapper
-    return decorator
+def get_all_metrics() -> bytes:
+    """Совместимый alias для экспорта всех метрик."""
+    return generate_latest(REGISTRY)
 
 
-def track_anomaly_detection(equipment_id: int, model_name: str):
-    """Декоратор для отслеживания обнаружения аномалий"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-
-            try:
-                result = func(*args, **kwargs)
-
-                # Если результат содержит информацию об аномалии
-                if isinstance(result, dict) and 'is_anomaly' in result:
-                    if result['is_anomaly']:
-                        defect_type = result.get('defect_type', 'unknown')
-                        anomalies_detected_total.labels(
-                            equipment_id=str(equipment_id),
-                            model_name=model_name,
-                            defect_type=defect_type
-                        ).inc()
-
-                return result
-            finally:
-                duration = time.time() - start_time
-                anomaly_detection_duration_seconds.labels(
-                    model_name=model_name,
-                    equipment_id=str(equipment_id)
-                ).observe(duration)
-
-        return wrapper
-    return decorator
+# --- Алиасы для совместимости тестов/старого кода ---
+def increment(name: str, labels: Optional[Dict[str, str]] = None, value: float = 1.0):
+    return increment_counter(name, labels, value)
 
 
-def track_forecast_generation(equipment_id: int, model_name: str, forecast_horizon: int):
-    """Декоратор для отслеживания генерации прогнозов"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            status = 'success'
-
-            try:
-                result = func(*args, **kwargs)
-                return result
-            except Exception as e:
-                status = 'error'
-                raise
-            finally:
-                duration = time.time() - start_time
-
-                # Метрика времени выполнения
-                forecast_latency_seconds.labels(
-                    model_name=model_name,
-                    equipment_id=str(equipment_id),
-                    forecast_horizon=str(forecast_horizon)
-                ).observe(duration)
-
-                # Счетчик прогнозов
-                forecasts_generated_total.labels(
-                    model_name=model_name,
-                    equipment_id=str(equipment_id),
-                    status=status
-                ).inc()
-
-        return wrapper
-    return decorator
+def observe(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    return observe_histogram(name, value, labels)
 
 
-def track_csv_processing(equipment_id: int):
-    """Декоратор для отслеживания обработки CSV файлов"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            status = 'success'
-
-            try:
-                result = func(*args, **kwargs)
-
-                # Подсчет обработанных точек данных
-                if isinstance(result, dict) and 'processed_points' in result:
-                    for phase, count in result['processed_points'].items():
-                        data_points_processed_total.labels(
-                            equipment_id=str(equipment_id),
-                            phase=phase
-                        ).inc(count)
-
-                return result
-            except Exception as e:
-                status = 'error'
-                raise
-            finally:
-                duration = time.time() - start_time
-
-                csv_files_processed_total.labels(
-                    equipment_id=str(equipment_id),
-                    status=status
-                ).inc()
-
-                csv_processing_duration_seconds.labels(
-                    equipment_id=str(equipment_id)
-                ).observe(duration)
-
-        return wrapper
-    return decorator
-
-
-def track_worker_task(task_name: str):
-    """Декоратор для отслеживания задач Celery"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            status = 'success'
-
-            worker_active_tasks.inc()
-
-            try:
-                result = func(*args, **kwargs)
-                return result
-            except Exception as e:
-                status = 'error'
-                raise
-            finally:
-                duration = time.time() - start_time
-
-                worker_active_tasks.dec()
-
-                worker_tasks_total.labels(
-                    task_name=task_name,
-                    status=status
-                ).inc()
-
-                worker_task_duration_seconds.labels(
-                    task_name=task_name
-                ).observe(duration)
-
-        return wrapper
-    return decorator
-
-
-def track_database_query(operation: str, table: str):
-    """Декоратор для отслеживания запросов к базе данных"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            start_time = time.time()
-
-            try:
-                result = await func(*args, **kwargs)
-                return result
-            finally:
-                duration = time.time() - start_time
-                database_query_duration_seconds.labels(
-                    operation=operation,
-                    table=table
-                ).observe(duration)
-
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            start_time = time.time()
-
-            try:
-                result = func(*args, **kwargs)
-                return result
-            finally:
-                duration = time.time() - start_time
-                database_query_duration_seconds.labels(
-                    operation=operation,
-                    table=table
-                ).observe(duration)
-
-        # Возвращаем соответствующий wrapper в зависимости от типа функции
-        import asyncio
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-
-    return decorator
-
-
-def increment_counter(counter_name: str, labels: Dict[str, str] = None, value: float = 1):
-    """Увеличение счетчика по имени"""
-    counters = {
-        'api_requests_total': api_requests_total,
-        'anomalies_detected_total': anomalies_detected_total,
-        'forecasts_generated_total': forecasts_generated_total,
-        'csv_files_processed_total': csv_files_processed_total,
-        'data_points_processed_total': data_points_processed_total,
-        'worker_tasks_total': worker_tasks_total
-    }
-
-    counter = counters.get(counter_name)
-    if counter:
-        if labels:
-            counter.labels(**labels).inc(value)
-        else:
-            counter.inc(value)
-    else:
-        logger.warning(f"Неизвестный счетчик: {counter_name}")
-
-
-def observe_histogram(histogram_name: str, value: float, labels: Dict[str, str] = None):
-    """Добавление значения в гистограмму по имени"""
-    histograms = {
-        'api_request_duration_seconds': api_request_duration_seconds,
-        'anomaly_detection_duration_seconds': anomaly_detection_duration_seconds,
-        'forecast_latency_seconds': forecast_latency_seconds,
-        'csv_processing_duration_seconds': csv_processing_duration_seconds,
-        'worker_task_duration_seconds': worker_task_duration_seconds,
-        'database_query_duration_seconds': database_query_duration_seconds
-    }
-
-    histogram = histograms.get(histogram_name)
-    if histogram:
-        if labels:
-            histogram.labels(**labels).observe(value)
-        else:
-            histogram.observe(value)
-    else:
-        logger.warning(f"Неизвестная гистограмма: {histogram_name}")
-
-
-def set_gauge(gauge_name: str, value: float, labels: Dict[str, str] = None):
-    """Установка значения gauge по имени"""
-    gauges = {
-        'worker_active_tasks': worker_active_tasks,
-        'system_cpu_usage_percent': system_cpu_usage_percent,
-        'system_memory_usage_bytes': system_memory_usage_bytes,
-        'system_disk_usage_bytes': system_disk_usage_bytes,
-        'database_connections_active': database_connections_active
-    }
-
-    gauge = gauges.get(gauge_name)
-    if gauge:
-        if labels:
-            gauge.labels(**labels).set(value)
-        else:
-            gauge.set(value)
-    else:
-        logger.warning(f"Неизвестный gauge: {gauge_name}")
-
-
-def get_all_metrics() -> str:
-    """Получение всех метрик в формате Prometheus"""
-    return metrics_collector.get_metrics()
+__all__ = [
+    'REGISTRY',
+    'api_requests_total', 'api_request_duration_seconds',
+    'anomalies_detected_total', 'anomaly_detection_duration_seconds',
+    'forecast_latency_seconds', 'forecasts_generated_total',
+    'csv_files_processed_total', 'csv_processing_duration_seconds', 'data_points_processed_total',
+    'worker_tasks_total', 'worker_task_duration_seconds', 'worker_active_tasks',
+    'system_cpu_usage_percent', 'system_memory_usage_bytes', 'system_disk_usage_bytes',
+    'database_connections_active', 'database_query_duration_seconds', 'app_info',
+    'increment_counter', 'observe_histogram', 'set_gauge', 'get_metrics', 'get_all_metrics', 'observe_latency',
+    'metrics_collector',
+    'increment', 'observe', 'track_worker_task'
+]

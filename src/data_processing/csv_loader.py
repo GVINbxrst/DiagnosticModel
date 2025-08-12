@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, AsyncGenerator
 from uuid import UUID
+import time
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,7 @@ from src.database.connection import get_async_session
 from src.database.models import Equipment, RawSignal
 from src.utils.logger import get_logger
 from src.utils.serialization import dump_float32_array, load_float32_array
+from src.utils import metrics as m
 
 # Настройки
 settings = get_settings()
@@ -67,16 +69,24 @@ class CSVProcessingStats:
         self.samples_count_total: int = 0
         self.phases_present: Dict[str, bool] = {"R": False, "S": False, "T": False}
 
-    def add_batch_stats(self, batch_size: int, nan_counts: Dict[str, int], raw_id: Optional[UUID], samples_count: int, phases_present: Dict[str, bool]):
+    def add_batch_stats(
+        self,
+        batch_size: int,
+        nan_counts: Dict[str, int],
+        raw_id: Optional[UUID] = None,
+        samples_count: int = 0,
+        phases_present: Optional[Dict[str, bool]] = None,
+    ):
         """Добавить статистику обработанной пачки"""
         self.processed_rows += batch_size
         self.batches_processed += 1
         if raw_id:
             self.raw_signal_ids.append(raw_id)
         self.samples_count_total += samples_count
-        for p, has in phases_present.items():
-            if has:
-                self.phases_present[p] = True
+        if phases_present:
+            for p, has in phases_present.items():
+                if has:
+                    self.phases_present[p] = True
 
         for phase, count in nan_counts.items():
             self.nan_values[phase] += count
@@ -332,6 +342,7 @@ class CSVLoader:
             recorded_at = datetime.fromtimestamp(file_path.stat().st_mtime)
 
         try:
+            file_timer_start = datetime.now()
             async with get_async_session() as session:
                 # Проверяем, не загружен ли уже этот файл
                 from sqlalchemy import select
@@ -375,9 +386,23 @@ class CSVLoader:
 
         except Exception as e:
             self.logger.error(f"Ошибка при обработке файла {file_path}: {e}")
+            try:
+                m.increment_counter('csv_files_processed_total', {'equipment_id': str(equipment_id) if equipment_id else 'unknown', 'status': 'failed'})
+            except Exception:
+                pass
             raise
 
         stats.finish()
+        # Метрики после успешной обработки
+        try:
+            m.increment_counter('csv_files_processed_total', {'equipment_id': str(equipment_id), 'status': 'success'})
+            m.observe_histogram('csv_processing_duration_seconds', stats.processing_time, {'equipment_id': str(equipment_id)})
+            # По фазам количество точек
+            for phase in ['R','S','T']:
+                if stats.nan_values.get(phase, 0) >= 0:
+                    m.increment_counter('data_points_processed_total', {'equipment_id': str(equipment_id), 'phase': phase}, value=float(stats.samples_count_total))
+        except Exception:
+            pass
 
         self.logger.info(f"Файл обработан успешно:")
         self.logger.info(f"  - Строк обработано: {stats.processed_rows:,}")
@@ -396,8 +421,8 @@ class CSVLoader:
         sample_rate: int,
         recorded_at: datetime,
         file_hash: str,
-    session: AsyncSession,
-    metadata: Dict
+        session: AsyncSession,
+        metadata: Optional[Dict] = None,
     ) -> AsyncGenerator[Dict, None]:
         """
         Обработать CSV файл по пачкам
@@ -414,8 +439,8 @@ class CSVLoader:
                 if not header_row:
                     raise InvalidCSVFormatError("Пустой заголовок")
 
-                # В нашем формате заголовок находится в первой ячейке
-                header_line = header_row[0] if header_row else ""
+                # Поддержка как один-столбец-строка, так и стандартного многоколонного CSV
+                header_line = header_row[0] if (len(header_row) == 1) else ','.join(header_row)
                 phases = parse_csv_header(header_line)
 
             except StopIteration:
@@ -432,7 +457,7 @@ class CSVLoader:
             row_number = 1  # Начинаем с 1, т.к. 0 - заголовок
 
             corrupt_logged = 0
-            for row in reader:
+        for row in reader:
                 row_number += 1
 
                 if not row or not row[0].strip():
@@ -440,7 +465,8 @@ class CSVLoader:
 
                 try:
                     # Парсим строку данных
-                    values, nan_mask = parse_csv_row(row[0])
+            row_line = row[0] if (len(row) == 1) else ','.join(row)
+            values, nan_mask = parse_csv_row(row_line)
 
                     # Добавляем данные в пачку
                     for i, phase in enumerate(['R', 'S', 'T']):
@@ -451,6 +477,7 @@ class CSVLoader:
                     batch_size += 1
 
                     # Если пачка заполнена, сохраняем
+                    batch_t0 = time.time() if 'time' in globals() else None
                     if batch_size >= self.batch_size:
                         raw_id, samples_count, phases_present = await self._save_batch_to_db(
                             batch_data, equipment_id, sample_rate,
@@ -469,7 +496,21 @@ class CSVLoader:
                         # Очищаем пачку
                         batch_data = {'R': [], 'S': [], 'T': []}
                         batch_nan_counts = {'R': 0, 'S': 0, 'T': 0}
+                        # Метрики по пачке
+                        try:
+                            m.observe_histogram('csv_batch_rows', float(self.batch_size), {'equipment_id': str(equipment_id)})
+                            if batch_t0 is not None:
+                                m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
+                        except Exception:
+                            pass
                         batch_size = 0
+                        # Метрики по пачке
+                        try:
+                            for p in ['R','S','T']:
+                                if phases_present.get(p):
+                                    m.increment_counter('data_points_processed_total', {'equipment_id': str(equipment_id), 'phase': p}, value=float(samples_count))
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     if corrupt_logged < 100:
@@ -479,6 +520,7 @@ class CSVLoader:
 
             # Сохраняем оставшиеся данные
             if batch_size > 0:
+                batch_t0 = time.time() if 'time' in globals() else None
                 raw_id, samples_count, phases_present = await self._save_batch_to_db(
                     batch_data, equipment_id, sample_rate,
                     recorded_at, file_hash, file_path.name, session, metadata
@@ -491,6 +533,16 @@ class CSVLoader:
                     'samples_count': samples_count,
                     'phases_present': phases_present
                 }
+                # Метрики по финальной пачке
+                try:
+                    for p in ['R','S','T']:
+                        if phases_present.get(p):
+                            m.increment_counter('data_points_processed_total', {'equipment_id': str(equipment_id), 'phase': p}, value=float(samples_count))
+                    m.observe_histogram('csv_batch_rows', float(batch_size), {'equipment_id': str(equipment_id)})
+                    if batch_t0 is not None:
+                        m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
+                except Exception:
+                    pass
 
     async def _save_batch_to_db(
         self,
@@ -500,8 +552,8 @@ class CSVLoader:
         recorded_at: datetime,
         file_hash: str,
         file_name: str,
-    session: AsyncSession,
-    metadata: Dict
+        session: AsyncSession,
+        metadata: Optional[Dict] = None,
     ) -> Tuple[Optional[UUID], int, Dict[str, bool]]:
         """
         Сохранить пачку данных в базу данных
@@ -515,7 +567,7 @@ class CSVLoader:
             file_name: Имя файла
             session: Сессия базы данных
         """
-        # Конвертируем в numpy массивы
+    # Конвертируем в numpy массивы
         phase_arrays = {}
         samples_count = 0
 
@@ -541,10 +593,18 @@ class CSVLoader:
             self.logger.warning("Пачка содержит только NaN значения, пропускаем")
             return None, 0, phases_present
 
+        # Нормализуем recorded_at, поддерживая строку ISO
+        rec_at = recorded_at
+        if isinstance(rec_at, str):
+            try:
+                rec_at = datetime.fromisoformat(rec_at)
+            except Exception:
+                rec_at = datetime.utcnow()
+
         # Создаем запись в базе данных
         raw_signal = RawSignal(
             equipment_id=equipment_id,
-            recorded_at=recorded_at,
+            recorded_at=rec_at,
             sample_rate_hz=sample_rate,
             samples_count=samples_count,
             phase_a=phase_arrays['R'],
@@ -564,8 +624,8 @@ class CSVLoader:
         session.add(raw_signal)
 
         # Флашим изменения, но не коммитим (это делается выше)
-    await session.flush()
-    return raw_signal.id, samples_count, phases_present
+        await session.flush()
+        return raw_signal.id, samples_count, phases_present
 
 
 # Вспомогательные функции для CLI использования

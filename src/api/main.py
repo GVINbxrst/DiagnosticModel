@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from src.api.middleware.metrics import MetricsMiddleware
+from src.api.middleware.metrics import PrometheusMiddleware
 from src.api.routes import monitoring
 from src.utils.logger import setup_logging, get_logger
 from src.utils.metrics import metrics_collector
@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 app = FastAPI()
 
 # Добавление middleware для метрик
-app.add_middleware(MetricsMiddleware)
+app.add_middleware(PrometheusMiddleware)
 
 # Добавление маршрутов мониторинга
 app.include_router(
@@ -29,9 +29,7 @@ async def startup_event():
     metrics_collector.update_system_metrics()
     logger.info("📊 Система метрик инициализирована")
 
-    # Инициализация базы данных
-    await init_database()
-    logger.info("🗄️ База данных подключена")
+    # Здесь можно инициализировать дополнительные ресурсы при старте
 
 
 @app.on_event("shutdown")
@@ -39,6 +37,4 @@ async def shutdown_event():
     """События при завершении работы приложения"""
     logger.info("🛑 Завершение работы DiagMod API")
 
-    # Закрытие соединений с базой данных
-    await close_database_connections()
-    logger.info("🗄️ Соединения с базой данных закрыты")
+    # Здесь можно освободить ресурсы при завершении

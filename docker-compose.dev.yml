@@ -76,6 +76,24 @@ services:
     networks:
       - diagmod_network
 
+  loader:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: development
+    working_dir: /app
+    command: ["bash"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://diagmod_dev:diagmod_dev_password@postgres:5432/diagmod_dev
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=DEBUG
+    volumes:
+      # Замените путь слева на абсолютный путь к вашей локальной папке с CSV
+      - /absolute/path/to/csvs:/data/csvs:ro
+    depends_on:
+      - postgres
+      - redis
+
 volumes:
   postgres_dev_data:
   redis_dev_data:
