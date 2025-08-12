@@ -62,22 +62,71 @@ async def upload_csv_file(
         file.file.seek(0, 2)  # Конец файла
         file_size = file.file.tell()
         file.file.seek(current_pos)  # Возвращаемся к началу
-
         if file_size > 500 * 1024 * 1024:  # 500MB
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="Размер файла превышает 500MB"
             )
 
-    # Обработка equipment_id
+    # Проверка equipment_id (если есть)
     target_equipment_id = None
     if equipment_id:
         try:
             target_equipment_id = UUID(equipment_id)
-
-            # Проверяем существование оборудования
             from sqlalchemy import select
             query = select(Equipment).where(Equipment.id == target_equipment_id)
+            eq = await session.execute(query)
+            if not eq.scalar_one_or_none():
+                raise HTTPException(status_code=422, detail="Оборудование не найдено")
+        except Exception:
+            raise HTTPException(status_code=422, detail="Некорректный equipment_id")
+
+    # Сохраняем файл во временный файл
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            tmp_path = tmp.name
+    except Exception as e:
+        logger.error(f"Ошибка сохранения файла: {e}")
+        raise HTTPException(status_code=500, detail="Ошибка сохранения файла")
+
+    # Проверяем заголовок CSV
+    try:
+        with open(tmp_path, 'r', encoding='utf-8') as f:
+            header = f.readline().strip()
+        if header != 'current_R,current_S,current_T':
+            os.unlink(tmp_path)
+            raise HTTPException(status_code=422, detail="Некорректный заголовок CSV. Ожидается: current_R,current_S,current_T")
+    except Exception as e:
+        logger.error(f"Ошибка чтения заголовка: {e}")
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail="Ошибка чтения файла")
+
+    # Загружаем CSV через CSVLoader
+    try:
+        loader = CSVLoader()
+        raw_id = await loader.load_csv_file(tmp_path, equipment_id=target_equipment_id, sample_rate=sample_rate, description=description, session=session)
+    except InvalidCSVFormatError as e:
+        os.unlink(tmp_path)
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Ошибка загрузки CSV: {e}")
+        os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail="Ошибка обработки файла")
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    # Ставим задачу Celery
+    try:
+        task = process_raw.delay(str(raw_id))
+    except Exception as e:
+        logger.error(f"Ошибка постановки задачи Celery: {e}")
+        raise HTTPException(status_code=500, detail="Ошибка постановки задачи Celery")
+
+    return {"raw_id": str(raw_id), "task_id": str(task.id), "status": "queued"}
             result = await session.execute(query)
             equipment = result.scalar_one_or_none()
 

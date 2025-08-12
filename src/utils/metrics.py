@@ -19,8 +19,62 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Глобальный реестр метрик
 REGISTRY = CollectorRegistry()
+# --- Минимальные публичные API ---
+def increment_counter(name: str, labels: Optional[Dict[str, str]] = None):
+    metric = globals().get(name)
+    if metric is None:
+        logger.warning(f"Метрика {name} не найдена для increment_counter")
+        return
+    if labels:
+        metric.labels(**labels).inc()
+    else:
+        metric.inc()
+
+def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None):
+    metric = globals().get(name)
+    if metric is None:
+        logger.warning(f"Метрика {name} не найдена для observe_histogram")
+        return
+    if labels:
+        metric.labels(**labels).observe(value)
+    else:
+        metric.observe(value)
+
+def get_metrics() -> bytes:
+    return generate_latest(REGISTRY)
+
+def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
+    def decorator(func: Callable):
+        is_coroutine = asyncio.iscoroutinefunction(func)
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                metric = globals().get(metric_name)
+                if metric:
+                    if labels:
+                        metric.labels(**labels).observe(duration)
+                    else:
+                        metric.observe(duration)
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                metric = globals().get(metric_name)
+                if metric:
+                    if labels:
+                        metric.labels(**labels).observe(duration)
+                    else:
+                        metric.observe(duration)
+        return async_wrapper if is_coroutine else sync_wrapper
+    return decorator
 
 # Основные метрики для API
 api_requests_total = Counter(

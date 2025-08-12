@@ -83,71 +83,59 @@ class PrometheusMetrics:
         )
 
         self.processing_queue_size = Gauge(
-            'processing_queue_size',
-            'Размер очереди обработки'
         )
 
-        self.database_connections_active = Gauge(
             'database_connections_active',
-            'Количество активных подключений к БД'
-        )
-
         # Ошибки
         self.api_errors_total = Counter(
             'api_errors_total',
-            'Общее количество ошибок API',
-            ['status_code', 'error_type']
         )
-
-        self.worker_task_failures_total = Counter(
-            'worker_task_failures_total',
-            'Количество неудачных worker задач',
-            ['task_name', 'error_type']
         )
-
-        # Файлы
-        self.files_uploaded_total = Counter(
-            'files_uploaded_total',
             'Общ��е количество загруженных файлов',
-            ['file_type', 'status']
-        )
 
-        self.file_upload_size_bytes = Histogram(
-            'file_upload_size_bytes',
-            'Размер загружаемых файлов в байт��х',
-            buckets=[1024, 10240, 102400, 1048576, 10485760, 104857600]  # 1KB - 100MB
-        )
 
-        logger.info("📊 Prometheus метрики инициализированы")
-
-    def increment_counter(self, metric_name: str, labels: Dict[str, str] = None):
         """Увеличение счетчика"""
-        try:
-            metric = getattr(self, metric_name)
             if labels:
-                metric.labels(**labels).inc()
-            else:
-                metric.inc()
-        except AttributeError:
-            logger.warning(f"Метрика {metric_name} не найдена")
 
-    def observe_histogram(self, metric_name: str, value: float, labels: Dict[str, str] = None):
-        """Добавление значения в гистограмму"""
-        try:
             metric = getattr(self, metric_name)
-            if labels:
-                metric.labels(**labels).observe(value)
             else:
-                metric.observe(value)
-        except AttributeError:
-            logger.warning(f"Метрика {metric_name} не найдена")
-
-    def set_gauge(self, metric_name: str, value: float, labels: Dict[str, str] = None):
         """Установка значения gauge"""
-        try:
-            metric = getattr(self, metric_name)
-            if labels:
                 metric.labels(**labels).set(value)
+            from starlette.middleware.base import BaseHTTPMiddleware
+            from fastapi import Request, Response
+            from prometheus_client import Counter, Histogram
+
+            class PrometheusMetrics(BaseHTTPMiddleware):
+                def __init__(self, app):
+                    super().__init__(app)
+                    self.api_requests_total = Counter(
+                        'api_requests_total',
+                        'Общее количество HTTP запросов',
+                        ['method', 'endpoint', 'status_code', 'user_role']
+                    )
+                    self.api_request_duration_seconds = Histogram(
+                        'api_request_duration_seconds',
+                        'Время выполнения HTTP запросов',
+                        ['method', 'endpoint'],
+                        buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0]
+                    )
+
+                async def dispatch(self, request: Request, call_next):
+                    method = request.method
+                    endpoint = request.url.path
+                    user_role = 'anonymous'
+                    start = time.time()
+                    try:
+                        response = await call_next(request)
+                        status_code = str(response.status_code)
+                    except Exception:
+                        status_code = '500'
+                        raise
+                    finally:
+                        duration = time.time() - start
+                        self.api_requests_total.labels(method, endpoint, status_code, user_role).inc()
+                        self.api_request_duration_seconds.labels(method, endpoint).observe(duration)
+                    return response
             else:
                 metric.set(value)
         except AttributeError:
