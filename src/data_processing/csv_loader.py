@@ -68,6 +68,7 @@ class CSVProcessingStats:
         self.raw_signal_ids: List[UUID] = []
         self.samples_count_total: int = 0
         self.phases_present: Dict[str, bool] = {"R": False, "S": False, "T": False}
+    self.phase_status: Dict[str, str] = {"R": "ok", "S": "ok", "T": "ok"}
 
     def add_batch_stats(
         self,
@@ -78,7 +79,8 @@ class CSVProcessingStats:
         phases_present: Optional[Dict[str, bool]] = None,
     ):
         """Добавить статистику обработанной пачки"""
-        self.processed_rows += batch_size
+    self.processed_rows += batch_size
+    self.total_rows += batch_size
         self.batches_processed += 1
         if raw_id:
             self.raw_signal_ids.append(raw_id)
@@ -94,6 +96,12 @@ class CSVProcessingStats:
     def finish(self):
         """Завершить подсчет статистики"""
         self.end_time = datetime.now()
+        # Определяем статус фаз: если вся фаза пустая (все NaN) -> missing
+        for p in ['R','S','T']:
+            if self.processed_rows > 0 and self.nan_values.get(p, 0) >= self.processed_rows:
+                self.phase_status[p] = 'missing'
+            else:
+                self.phase_status[p] = 'ok'
 
     @property
     def processing_time(self) -> float:
@@ -121,7 +129,8 @@ class CSVProcessingStats:
             'batches_processed': self.batches_processed,
             'raw_signal_ids': [str(r) for r in self.raw_signal_ids],
             'samples_count_total': self.samples_count_total,
-            'phases_present': self.phases_present
+            'phases_present': self.phases_present,
+            'phase_status': self.phase_status
         }
 
     # Совместимость со старым интерфейсом
@@ -137,7 +146,9 @@ class CSVProcessingStats:
 ## Сжатие/распаковка теперь централизовано в src.utils.serialization.
 ## Оставляем совместимость: экспорт прежних имен для тестов, но перенаправляем.
 def compress_float32_array(data: np.ndarray):  # type: ignore
-    return dump_float32_array(data)
+    """Back-compat wrapper returning b'' for empty arrays to satisfy legacy tests."""
+    b = dump_float32_array(data)
+    return b if b is not None else b''
 
 
 def decompress_float32_array(b: bytes):  # type: ignore
@@ -441,32 +452,29 @@ class CSVLoader:
 
                 # Поддержка как один-столбец-строка, так и стандартного многоколонного CSV
                 header_line = header_row[0] if (len(header_row) == 1) else ','.join(header_row)
-                phases = parse_csv_header(header_line)
+                _ = parse_csv_header(header_line)
 
             except StopIteration:
                 raise InvalidCSVFormatError("Файл пуст")
 
             # Обрабатываем данные пачками
-            batch_data = {
-                'R': [],
-                'S': [],
-                'T': []
-            }
+            batch_data = {'R': [], 'S': [], 'T': []}
             batch_nan_counts = {'R': 0, 'S': 0, 'T': 0}
             batch_size = 0
-            row_number = 1  # Начинаем с 1, т.к. 0 - заголовок
-
+            row_number = 1  # 0-я строка — заголовок
             corrupt_logged = 0
-        for row in reader:
+
+            for row in reader:
                 row_number += 1
 
-                if not row or not row[0].strip():
-                    continue  # Пропускаем пустые строки
+                # Пропускаем полностью пустые строки
+                if not row or (len(row) == 1 and not row[0].strip()) or (len(row) == 0):
+                    continue
 
                 try:
                     # Парсим строку данных
-            row_line = row[0] if (len(row) == 1) else ','.join(row)
-            values, nan_mask = parse_csv_row(row_line)
+                    row_line = row[0] if (len(row) == 1) else ','.join(row)
+                    values, nan_mask = parse_csv_row(row_line)
 
                     # Добавляем данные в пачку
                     for i, phase in enumerate(['R', 'S', 'T']):
@@ -477,7 +485,7 @@ class CSVLoader:
                     batch_size += 1
 
                     # Если пачка заполнена, сохраняем
-                    batch_t0 = time.time() if 'time' in globals() else None
+                    batch_t0 = time.time()
                     if batch_size >= self.batch_size:
                         raw_id, samples_count, phases_present = await self._save_batch_to_db(
                             batch_data, equipment_id, sample_rate,
@@ -499,12 +507,10 @@ class CSVLoader:
                         # Метрики по пачке
                         try:
                             m.observe_histogram('csv_batch_rows', float(self.batch_size), {'equipment_id': str(equipment_id)})
-                            if batch_t0 is not None:
-                                m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
+                            m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
                         except Exception:
                             pass
                         batch_size = 0
-                        # Метрики по пачке
                         try:
                             for p in ['R','S','T']:
                                 if phases_present.get(p):
@@ -520,7 +526,7 @@ class CSVLoader:
 
             # Сохраняем оставшиеся данные
             if batch_size > 0:
-                batch_t0 = time.time() if 'time' in globals() else None
+                batch_t0 = time.time()
                 raw_id, samples_count, phases_present = await self._save_batch_to_db(
                     batch_data, equipment_id, sample_rate,
                     recorded_at, file_hash, file_path.name, session, metadata
@@ -539,8 +545,7 @@ class CSVLoader:
                         if phases_present.get(p):
                             m.increment_counter('data_points_processed_total', {'equipment_id': str(equipment_id), 'phase': p}, value=float(samples_count))
                     m.observe_histogram('csv_batch_rows', float(batch_size), {'equipment_id': str(equipment_id)})
-                    if batch_t0 is not None:
-                        m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
+                    m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
                 except Exception:
                     pass
 
