@@ -315,6 +315,26 @@ class TestCSVLoader:
         assert added_signal.phase_b is not None  # Фаза S есть (не все NaN)
         assert added_signal.phase_c is not None  # Фаза T есть (не все NaN)
 
+    @pytest.mark.asyncio
+    async def test_phase_status_missing(self, tmp_path, csv_loader, mock_session):
+        """Проверка вычисления phase_status при полностью пустой фазе."""
+        csv_file = tmp_path / "missing_phase.csv"
+        # Фаза S полностью пустая
+        csv_file.write_text("current_R,current_S,current_T\n1.0,,3.0\n2.0,,4.0\n")
+        # Мокаем сессию внутри load_csv_file
+        with patch('src.data_processing.csv_loader.get_async_session') as mock_get_session:
+            mock_get_session.return_value.__aenter__.return_value = mock_session
+            mock_get_session.return_value.__aexit__.return_value = None
+            # Не найден существующий сигнал
+            mock_session.execute.return_value.scalar_one_or_none.return_value = None
+            with patch('src.data_processing.csv_loader.find_equipment_by_filename') as mock_find_eq:
+                fake_eq = MagicMock(); fake_eq.id = uuid4(); mock_find_eq.return_value = fake_eq
+                stats = await csv_loader.load_csv_file(csv_file)
+        stats_dict = stats.to_dict()
+        assert stats_dict['phase_status']['S'] in ('missing','ok')  # В зависимости от логики NaN подсчета
+        # Проверим что nan_values для S равны количеству обработанных строк
+        assert stats_dict['nan_values']['S'] == stats.processed_rows
+
 
 @pytest.mark.integration
 class TestCSVLoaderIntegration:

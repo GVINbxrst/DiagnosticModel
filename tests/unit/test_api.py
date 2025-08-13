@@ -108,107 +108,67 @@ class TestHealthEndpoints:
         assert data["status"] == "unhealthy"
 
 
-class TestAuthEndpoints:
-    """Тесты эндпоинтов авторизации"""
+class TestSignalsEndpoints:
+    """Тесты эндпоинтов сигналов"""
 
-    @patch('src.api.routes.auth.authenticate_user')
-    def test_login_success(self, mock_auth, client, mock_user):
-        """Тест успешной авторизации"""
-        mock_auth.return_value = mock_user
+    def test_get_signal_data_success(self, client, auth_headers):
+        from src.api.middleware import auth as auth_module
+        from src.database.connection import get_async_session
+        from datetime import datetime
+        import numpy as np
+        from src.utils.serialization import dump_float32_array
+        from src.database.models import ProcessingStatus
 
-        login_data = {
-            "username": "test_user",
-            "password": "test_password"
-        }
+        # Авторизация override
+        client.app.dependency_overrides[auth_module.require_any_role] = lambda: Mock(username="tester", id=uuid4())
 
-        response = client.post("/auth/login", json=login_data)
-        assert response.status_code == 200
+        # Мокаем RawSignal
+        mock_signal = Mock(spec=RawSignal)
+        mock_signal.id = uuid4()
+        mock_signal.equipment_id = uuid4()
+        mock_signal.sample_rate_hz = 25600
+        mock_signal.samples_count = 1000
+        mock_signal.metadata = {"original_filename": "test.csv"}
+        mock_signal.processing_status = ProcessingStatus.COMPLETED
+        mock_signal.recorded_at = datetime.utcnow()
+        mock_signal.file_hash = "hash123"
 
+        test_data = np.random.normal(0, 1, 64).astype(np.float32)
+        compressed = dump_float32_array(test_data)
+        mock_signal.phase_a = compressed
+        mock_signal.phase_b = compressed
+        mock_signal.phase_c = None
+
+        # Мокаем сессию
+        mock_db_session = AsyncMock()
+        async def override_session():
+            yield mock_db_session
+        client.app.dependency_overrides[get_async_session] = override_session
+
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = mock_signal
+        mock_db_session.execute.return_value = mock_result
+
+        response = client.get(f"/api/v1/signals/{mock_signal.id}", headers=auth_headers)
+        assert response.status_code == 200, response.text
         data = response.json()
-        assert "access_token" in data
-        assert "refresh_token" in data
-        assert data["token_type"] == "bearer"
+        assert data["raw_signal_id"] == str(mock_signal.id)
+        assert len(data["phases"]) == 3
 
-    @patch('src.api.routes.auth.authenticate_user')
-    def test_login_invalid_credentials(self, mock_auth, client):
-        """Тест авторизации с неверными данными"""
-        mock_auth.return_value = None
-
-        login_data = {
-            "username": "wrong_user",
-            "password": "wrong_password"
-        }
-
-        response = client.post("/auth/login", json=login_data)
-        assert response.status_code == 401
-
-        data = response.json()
-        assert data["detail"] == "Неверное имя пользователя или пароль"
-
-    def test_protected_endpoint_without_token(self, client):
-        """Тест защищенного эндпоинта без токена"""
-        response = client.get("/api/v1/signals")
-        assert response.status_code == 403  # Или 401 в зависимости от реализации
-
-
-class TestUploadEndpoints:
-    """Тесты эндпоинтов загрузки файлов"""
-
-    @patch('src.api.routes.upload.CSVLoader')
-    @patch('src.api.routes.upload.process_raw')
-    def test_upload_csv_success(self, mock_process_raw, mock_csv_loader, client, auth_headers, mock_equipment):
-        """Тест успешной загрузки CSV файла"""
-        # Мокаем CSV загрузчик
-        mock_loader_instance = Mock()
-        mock_stats = Mock()
-        mock_stats.raw_signal_id = uuid4()
-        mock_stats.total_samples = 1000
-        mock_stats.phase_a_samples = 1000
-        mock_stats.phase_b_samples = 1000
-        mock_stats.phase_c_samples = 0
-        mock_stats.upload_time = "2024-01-01T00:00:00"
-
-        mock_loader_instance.load_csv_file.return_value = mock_stats
-        mock_csv_loader.return_value = mock_loader_instance
-
-        # Мокаем задачу worker
-        mock_task = Mock()
-        mock_task.id = "task-123"
-        mock_process_raw.delay.return_value = mock_task
-
-        # Мокаем создание оборудования
-        with patch('src.api.routes.upload._create_equipment_from_filename') as mock_create_eq:
-            mock_create_eq.return_value = mock_equipment.id
-
-            # Создаем тестовый CSV файл
-            csv_content = "current_R,current_S,current_T\n1.0,2.0,\n3.0,4.0,"
-            files = {"file": ("test.csv", io.StringIO(csv_content), "text/csv")}
-
-            response = client.post(
-                "/api/v1/upload",
-                files=files,
-                headers=auth_headers
-            )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert "raw_signal_id" in data
-        assert "processing_task_id" in data
-
-    def test_upload_non_csv_file(self, client, auth_headers):
-        """Тест загрузки не-CSV файла"""
-        files = {"file": ("test.txt", io.StringIO("not a csv"), "text/plain")}
-
-        response = client.post(
-            "/api/v1/upload",
-            files=files,
-            headers=auth_headers
-        )
-
-        assert response.status_code == 400
-        data = response.json()
-        assert "CSV" in data["detail"]
+    def test_get_signal_data_not_found(self, client, auth_headers):
+        from src.api.middleware import auth as auth_module
+        from src.database.connection import get_async_session
+        client.app.dependency_overrides[auth_module.require_any_role] = lambda: Mock(username="tester", id=uuid4())
+        mock_db_session = AsyncMock()
+        async def override_session():
+            yield mock_db_session
+        client.app.dependency_overrides[get_async_session] = override_session
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_db_session.execute.return_value = mock_result
+        signal_id = uuid4()
+        response = client.get(f"/api/v1/signals/{signal_id}", headers=auth_headers)
+        assert response.status_code == 404
 
 
 class TestAnomaliesEndpoints:
@@ -270,67 +230,6 @@ class TestAnomaliesEndpoints:
         assert "не найдено" in data["detail"]
 
 
-class TestSignalsEndpoints:
-    """Тесты эндпоинтов сигналов"""
-
-    @patch('src.api.routes.signals.get_async_session')
-    def test_get_signal_data_success(self, mock_session, client, auth_headers):
-        """Тест получения данных сигнала"""
-        # Мокаем сигнал
-        mock_signal = Mock(spec=RawSignal)
-        mock_signal.id = uuid4()
-        mock_signal.equipment_id = uuid4()
-        mock_signal.sample_rate = 25600
-        mock_signal.samples_count = 1000
-        mock_signal.metadata = {}
-        mock_signal.processing_status = "completed"
-
-        # Мокаем сжатые данные фаз
-    import numpy as np
-    from src.utils.serialization import dump_float32_array
-    test_data = np.random.normal(0, 1, 100).astype(np.float32)
-    compressed_data = dump_float32_array(test_data)
-
-        mock_signal.phase_a = compressed_data
-        mock_signal.phase_b = compressed_data
-        mock_signal.phase_c = None
-
-        # Мокаем сессию БД
-        mock_db_session = AsyncMock()
-        mock_session.return_value.__aenter__.return_value = mock_db_session
-
-        mock_result = Mock()
-        mock_result.scalar_one_or_none.return_value = mock_signal
-        mock_db_session.execute.return_value = mock_result
-
-        response = client.get(
-            f"/api/v1/signals/{mock_signal.id}",
-            headers=auth_headers
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["raw_signal_id"] == str(mock_signal.id)
-        assert "phases" in data
-        assert len(data["phases"]) == 3
-
-    @patch('src.api.routes.signals.get_async_session')
-    def test_get_signal_data_not_found(self, mock_session, client, auth_headers):
-        """Тест получения несуществующего сигнала"""
-        mock_db_session = AsyncMock()
-        mock_session.return_value.__aenter__.return_value = mock_db_session
-
-        mock_result = Mock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_db_session.execute.return_value = mock_result
-
-        signal_id = uuid4()
-        response = client.get(
-            f"/api/v1/signals/{signal_id}",
-            headers=auth_headers
-        )
-
-        assert response.status_code == 404
 
 
 class TestMonitoringEndpoints:

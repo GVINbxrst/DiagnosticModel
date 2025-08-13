@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.auth import get_current_user, require_any_role
-from src.api.middleware.metrics import metrics
+from src.utils import metrics as utils_metrics
 from src.api.schemas import SignalResponse, PhaseData, UserInfo, SignalListResponse, SignalListItem
 from src.database.connection import get_async_session
 from src.database.models import RawSignal, Equipment, ProcessingStatus
@@ -124,7 +124,7 @@ async def get_signal_data(
         processing_time = time.time() - start_time
 
         # Обновляем метрики
-        metrics.observe_histogram(
+        utils_metrics.observe_histogram(
             'api_request_duration_seconds',
             processing_time,
             {'method': 'GET', 'endpoint': '/signals/{id}'}

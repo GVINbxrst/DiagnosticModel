@@ -2,7 +2,7 @@
 Pydantic схемы для API запросов и ответов
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from uuid import UUID
@@ -281,13 +281,15 @@ class TaskStatusResponse(BaseModel):
 
 # Валидаторы
 class UploadMetadata(UploadMetadata):
-    @validator('sample_rate')
+    @field_validator('sample_rate')
+    @classmethod
     def validate_sample_rate(cls, v):
         if v is not None and (v < 1000 or v > 100000):
             raise ValueError('Частота дискретизации должна быть от 1000 до 100000 Гц')
         return v
 
-    @validator('tags')
+    @field_validator('tags')
+    @classmethod
     def validate_tags(cls, v):
         if v and len(v) > 10:
             raise ValueError('Максимум 10 тегов')
@@ -295,9 +297,9 @@ class UploadMetadata(UploadMetadata):
 
 
 class AnomalyFilter(AnomalyFilter):
-    @validator('time_range')
+    @field_validator('time_range')
+    @classmethod
     def validate_time_range(cls, v):
-        if v and v.start_date and v.end_date:
-            if v.start_date >= v.end_date:
-                raise ValueError('Начальная дата должна быть раньше конечной')
+        if v and v.start_date and v.end_date and v.start_date >= v.end_date:
+            raise ValueError('Начальная дата должна быть раньше конечной')
         return v

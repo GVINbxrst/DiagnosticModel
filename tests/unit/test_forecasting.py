@@ -1,20 +1,4 @@
-    forecaster = ARIMAForecaster()
-
-    forecaster.fit(sample_time_series['value'])
-    result = forecaster.forecast(steps=forecast_steps)
-
-    assert len(result['forecast']) == forecast_steps
-    assert len(result['lower_ci']) == forecast_steps
-    assert len(result['upper_ci']) == forecast_steps
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-"""
-Тесты для модуля прогнозирования временных рядов
-
-Проверяет работу классов и функций прогнозирования RMS трендов
-"""
+"""Тесты для модуля прогнозирования временных рядов"""
 
 import pytest
 import numpy as np

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.api.middleware.auth import get_current_user, require_any_role
-from src.api.middleware.metrics import metrics
+from src.utils import metrics as utils_metrics
 from src.api.schemas import (
     AnomaliesResponse, AnomalyInfo, ForecastInfo,
     UserInfo, AnomalyFilter, TimeRangeFilter, PaginationParams
@@ -162,7 +162,11 @@ async def get_equipment_anomalies(
 
     processing_time = time.time() - start_time
 
-    # Метрика времени запроса теперь собирается декоратором observe_latency
+    # Метрика времени запроса собирается декоратором observe_latency; дополнительно фиксируем счётчик
+    utils_metrics.increment_counter(
+        'api_requests_total',
+        {'method': 'GET', 'endpoint': '/anomalies/{id}', 'status_code': '200', 'user_role': current_user.role if hasattr(current_user, 'role') else 'unknown'}
+    )
 
     logger.info(
         f"Запрос аномалий для оборудования {equipment_id} выполнен за {processing_time:.3f}s",
@@ -334,7 +338,7 @@ async def reanalyze_equipment(
         )
 
     # Запускаем полный workflow анализа
-    from src.worker.tasks.specialized_tasks import process_equipment_workflow
+    from src.worker.specialized_tasks import process_equipment_workflow
     task = process_equipment_workflow.delay(str(equipment_id), force_reprocess=True)
 
     logger.info(

@@ -43,6 +43,46 @@ DEFAULT_CONTAMINATION = 0.1  # Ожидаемая доля аномалий
 DEFAULT_RANDOM_STATE = 42
 MIN_SAMPLES_FOR_TRAINING = 100
 
+def load_latest_models() -> Dict[str, object]:
+    """Загрузка последней IsolationForest модели (минимально для worker.tasks).
+
+    Ожидает manifest.json в models/anomaly. Возвращает словарь с ключами
+    'isolation_forest' и 'preprocessor' (scaler) если найдено, иначе пустой dict.
+    """
+    model_dir = settings.models_path / 'anomaly'
+    manifest_path = model_dir / 'manifest.json'
+    if not manifest_path.exists():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        # Ищем самый поздний updated_at
+        latest_key = None
+        latest_ts = None
+        for k, v in manifest.items():
+            ts = v.get('updated_at')
+            if ts:
+                try:
+                    dt = datetime.fromisoformat(ts)
+                except Exception:
+                    dt = datetime.min
+            else:
+                dt = datetime.min
+            if latest_ts is None or dt > latest_ts:
+                latest_ts = dt
+                latest_key = k
+        if not latest_key:
+            return {}
+        model_path = Path(manifest[latest_key]['path'])
+        if not model_path.exists():
+            return {}
+        data = joblib.load(model_path)
+        model = data.get('model')
+        scaler = data.get('scaler')
+        return {'isolation_forest': model, 'preprocessor': scaler}
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить модели: {e}")
+        return {}
+
 
 class AnomalyModelError(Exception):
     """Базовое исключение для моделей аномалий"""

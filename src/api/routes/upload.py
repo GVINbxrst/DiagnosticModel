@@ -107,13 +107,13 @@ async def upload_csv_file(
     try:
         loader = CSVLoader()
         # Передаем расширенные метаданные
-    stats_or_id = await loader.load_csv_file(
+        stats_or_id = await loader.load_csv_file(
             tmp_path,
             equipment_id=target_equipment_id,
             sample_rate=sample_rate or 25600,
             metadata={
                 'original_filename': file.filename,
-        'uploaded_by': str(current_user.id) if current_user else None,
+                'uploaded_by': str(current_user.id) if current_user else None,
                 'description': description,
                 'file_size_bytes': file_size
             }

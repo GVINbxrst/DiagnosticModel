@@ -29,7 +29,17 @@ from src.database.connection import get_async_session
 from src.database.models import Equipment, RawSignal
 from src.utils.logger import get_logger
 from src.utils.serialization import dump_float32_array, load_float32_array
-from src.utils import metrics as m
+try:
+    from src.utils import metrics as m  # type: ignore
+except Exception:  # pragma: no cover - fallback for broken metrics during early steps
+    class _DummyMetrics:  # minimal no-op interface
+        @staticmethod
+        def increment_counter(*args, **kwargs):
+            return None
+        @staticmethod
+        def observe_histogram(*args, **kwargs):
+            return None
+    m = _DummyMetrics()  # type: ignore
 
 # Настройки
 settings = get_settings()
@@ -53,22 +63,33 @@ class InvalidCSVFormatError(CSVLoaderError):
 
 
 class CSVProcessingStats:
-    """Статистика обработки CSV файла"""
+    """Статистика обработки CSV файла.
 
-    def __init__(self):
+    Исправлена проблема с потенциально повреждённой индентацией: полностью
+    переопределён __init__ без смешения табов и пробелов.
+    """
+
+    def __init__(self) -> None:  # noqa: D401
+        # Счетчики строк
         self.total_rows: int = 0
         self.processed_rows: int = 0
         self.skipped_rows: int = 0
         self.invalid_rows: int = 0
-        self.nan_values: Dict[str, int] = {'R': 0, 'S': 0, 'T': 0}
+        # NaN по фазам
+        self.nan_values: Dict[str, int] = {"R": 0, "S": 0, "T": 0}
+        # Время
         self.start_time: datetime = datetime.now()
         self.end_time: Optional[datetime] = None
+        # Пачки
         self.batches_processed: int = 0
-        # Новые поля по контракту возврата
+        # Идентификаторы сохранённых RawSignal (может быть несколько)
         self.raw_signal_ids: List[UUID] = []
+        # Общее количество семплов (максимум samples_count по пачкам)
         self.samples_count_total: int = 0
+        # Какие фазы имели хотя бы одно ненулевое (не все NaN) значение
         self.phases_present: Dict[str, bool] = {"R": False, "S": False, "T": False}
-    self.phase_status: Dict[str, str] = {"R": "ok", "S": "ok", "T": "ok"}
+        # Статус фаз (ok|missing) — заполняется в finish()
+        self.phase_status: Dict[str, str] = {"R": "ok", "S": "ok", "T": "ok"}
 
     def add_batch_stats(
         self,
@@ -79,8 +100,8 @@ class CSVProcessingStats:
         phases_present: Optional[Dict[str, bool]] = None,
     ):
         """Добавить статистику обработанной пачки"""
-    self.processed_rows += batch_size
-    self.total_rows += batch_size
+        self.processed_rows += batch_size
+        self.total_rows += batch_size
         self.batches_processed += 1
         if raw_id:
             self.raw_signal_ids.append(raw_id)
@@ -89,7 +110,6 @@ class CSVProcessingStats:
             for p, has in phases_present.items():
                 if has:
                     self.phases_present[p] = True
-
         for phase, count in nan_counts.items():
             self.nan_values[phase] += count
 

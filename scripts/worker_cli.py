@@ -28,7 +28,7 @@ from src.worker.tasks import (
     process_raw, detect_anomalies, forecast_trend,
     cleanup_old_data, retrain_models
 )
-from src.worker.tasks.specialized_tasks import (
+from src.worker.specialized_tasks import (
     batch_process_directory, process_equipment_workflow,
     health_check_system, daily_equipment_report
 )

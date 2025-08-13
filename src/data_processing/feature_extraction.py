@@ -525,11 +525,11 @@ class FeatureExtractor:
                 raise ValueError(f"Сырой сигнал с ID {raw_signal_id} не найден")
 
             # Распаковываем данные фаз
-                        from src.utils.serialization import load_float32_array
+            from src.utils.serialization import load_float32_array
 
-                        phase_a = load_float32_array(raw_signal.phase_a) if raw_signal.phase_a else None
-                        phase_b = load_float32_array(raw_signal.phase_b) if raw_signal.phase_b else None
-                        phase_c = load_float32_array(raw_signal.phase_c) if raw_signal.phase_c else None
+            phase_a = load_float32_array(raw_signal.phase_a) if raw_signal.phase_a else None
+            phase_b = load_float32_array(raw_signal.phase_b) if raw_signal.phase_b else None
+            phase_c = load_float32_array(raw_signal.phase_c) if raw_signal.phase_c else None
 
             # Вычисляем параметры окон
             samples_per_window = int(window_duration_ms * self.sample_rate / 1000)

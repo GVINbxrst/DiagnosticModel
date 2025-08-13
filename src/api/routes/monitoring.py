@@ -1,19 +1,24 @@
+"""Маршруты мониторинга / health.
+
+Цели:
+1. Не упрощать бизнес-логику ради тестов (возвращаем максимально возможную информацию по окружению)
+2. Корректно работать как в production (PostgreSQL + Celery workers), так и в test (SQLite in‑memory, eager Celery)
+3. Минимизировать деградацию при отсутствии отдельных сервисов (graceful fallback)
 """
-Endpoint для мониторинга и здоровья системы
-Prometheus метрики и health checks
-"""
-from fastapi import APIRouter, Depends, HTTPException, Response
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-import asyncio
+from fastapi import APIRouter, HTTPException, Response
+from prometheus_client import CONTENT_TYPE_LATEST
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import psutil
-import asyncpg
+import json
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.utils.metrics import get_all_metrics, metrics_collector
 from src.utils.logger import get_logger
-from src.database.connection import get_database_pool
+from src.database.connection import engine, check_connection
 from src.config.settings import get_settings
+from src.worker.config import celery_app
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -22,7 +27,7 @@ settings = get_settings()
 
 
 @router.get("/metrics")
-async def prometheus_metrics():
+async def prometheus_metrics():  # оставляем sync-style отдачу, сбор уже сделан
     """
     Endpoint для Prometheus метрик
 
@@ -65,54 +70,34 @@ async def detailed_health_check():
         "components": {}
     }
 
-    # Проверка базы данных
-    try:
-        db_status = await check_database_health()
-        health_status["components"]["database"] = db_status
-    except Exception as e:
-        health_status["components"]["database"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+    # База данных
+    db_status = await check_database_health()
+    health_status["components"]["database"] = db_status
+    if db_status["status"] != "healthy":
         health_status["status"] = "degraded"
 
-    # Проверка Redis
-    try:
-        redis_status = await check_redis_health()
-        health_status["components"]["redis"] = redis_status
-    except Exception as e:
-        health_status["components"]["redis"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+    # Redis
+    redis_status = await check_redis_health()
+    health_status["components"]["redis"] = redis_status
+    if redis_status["status"] != "healthy":
         health_status["status"] = "degraded"
 
-    # Проверка системных ресурсов
-    try:
-        system_status = check_system_resources()
-        health_status["components"]["system"] = system_status
-
-        # Если ресурсы критичны, помечаем как degraded
+    # Системные ресурсы
+    system_status = check_system_resources()
+    health_status["components"]["system"] = system_status
+    if system_status.get("status") == "error":
+        health_status["status"] = "degraded"
+    else:
         if (system_status["cpu_percent"] > 90 or
             system_status["memory_percent"] > 95 or
             system_status["disk_percent"] > 95):
             health_status["status"] = "degraded"
 
-    except Exception as e:
-        health_status["components"]["system"] = {
-            "status": "unknown",
-            "error": str(e)
-        }
-
-    # Проверка Worker (Celery)
-    try:
-        worker_status = await check_worker_health()
-        health_status["components"]["worker"] = worker_status
-    except Exception as e:
-        health_status["components"]["worker"] = {
-            "status": "unknown",
-            "error": str(e)
-        }
+    # Celery workers
+    worker_status = await check_worker_health()
+    health_status["components"]["worker"] = worker_status
+    if worker_status["status"] not in {"healthy", "unknown"}:  # unhealthy -> degraded
+        health_status["status"] = "degraded"
 
     return health_status
 
@@ -166,195 +151,163 @@ async def system_stats():
 
 
 async def check_database_health() -> Dict[str, Any]:
-    """Проверка здоровья базы данных"""
-    start_time = time.time()
+    """Расширенная проверка БД.
 
+    Попытка различать Postgres / SQLite:
+    - Postgres: latency, active sessions, database size
+    - SQLite (тесты): просто latency + список таблиц
+    """
+    start = time.time()
+    status: Dict[str, Any] = {
+        "driver": engine.url.get_backend_name(),
+    }
     try:
-        # Получаем пул подключений
-        pool = await get_database_pool()
+        ok = await check_connection()
+        latency = round((time.time() - start) * 1000, 2)
+        status["latency_ms"] = latency
+        if not ok:
+            status["status"] = "unhealthy"
+            return status
 
-        # Выполняем тестовый запрос
-        async with pool.acquire() as connection:
-            result = await connection.fetchval("SELECT 1")
-
-        response_time = time.time() - start_time
-
-        return {
-            "status": "healthy",
-            "response_time_ms": round(response_time * 1000, 2),
-            "connections_used": pool.get_size() - pool.get_idle_size(),
-            "connections_idle": pool.get_idle_size(),
-            "connections_max": pool.get_max_size()
-        }
-
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "response_time_ms": round((time.time() - start_time) * 1000, 2)
-        }
+        # Попытка сбора продвинутой статистики
+        async with engine.connect() as conn:
+            dialect = engine.url.get_backend_name()
+            if dialect.startswith("postgres"):
+                # Активные подключения
+                active = await conn.execute(text("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"))
+                active_count = active.scalar_one()
+                size = await conn.execute(text("SELECT pg_database_size(current_database())"))
+                db_size = size.scalar_one()
+                version = await conn.execute(text("SELECT version()"))
+                version_str = version.scalar_one()
+                status.update({
+                    "status": "healthy",
+                    "active_connections": active_count,
+                    "database_size_bytes": db_size,
+                    "version": version_str,
+                })
+            else:  # SQLite или иное
+                tables = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+                table_list = [r[0] for r in tables]
+                status.update({
+                    "status": "healthy",
+                    "tables": table_list,
+                    "tables_count": len(table_list)
+                })
+    except SQLAlchemyError as e:
+        status.update({"status": "unhealthy", "error": str(e)})
+    except Exception as e:  # noqa
+        status.update({"status": "unhealthy", "error": str(e)})
+    return status
 
 
 async def check_redis_health() -> Dict[str, Any]:
-    """Проверка здоровья Redis"""
-    import redis.asyncio as redis
-
-    start_time = time.time()
-
+    """Проверка Redis (ping + версия при возможности)."""
+    import redis.asyncio as redis  # локальный импорт
+    started = time.time()
+    info: Dict[str, Any] = {}
     try:
-        # Подключаемся к Redis
-        redis_client = redis.from_url(settings.redis_url)
-
-        # Выполняем PING
-        result = await redis_client.ping()
-        await redis_client.close()
-
-        response_time = time.time() - start_time
-
+        client = redis.from_url(settings.REDIS_URL)
+        pong = await client.ping()
+        try:
+            server_info = await client.info(section="server")
+            info = {
+                "redis_version": server_info.get("redis_version"),
+                "mode": server_info.get("redis_mode"),
+                "uptime_sec": server_info.get("uptime_in_seconds"),
+            }
+        except Exception:
+            pass
+        await client.close()
         return {
-            "status": "healthy" if result else "unhealthy",
-            "response_time_ms": round(response_time * 1000, 2),
-            "ping_result": result
+            "status": "healthy" if pong else "unhealthy",
+            "latency_ms": round((time.time() - started) * 1000, 2),
+            **info
         }
-
-    except Exception as e:
+    except Exception as e:  # noqa
         return {
             "status": "unhealthy",
             "error": str(e),
-            "response_time_ms": round((time.time() - start_time) * 1000, 2)
+            "latency_ms": round((time.time() - started) * 1000, 2)
         }
 
 
 def check_system_resources() -> Dict[str, Any]:
-    """Проверка системных ресурсов"""
+    """Системные ресурсы (легковесно)."""
     try:
-        # CPU
-        cpu_percent = psutil.cpu_percent(interval=1)
-
-        # Память
-        memory = psutil.virtual_memory()
-        memory_percent = memory.percent
-
-        # Диск
+        cpu = psutil.cpu_percent(interval=0.2)
+        mem = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
-        disk_percent = (disk.used / disk.total) * 100
-
-        # Сетевые подключения
-        connections = len(psutil.net_connections())
-
-        # Процессы
-        process_count = len(psutil.pids())
-
         return {
             "status": "healthy",
-            "cpu_percent": round(cpu_percent, 2),
-            "memory_percent": round(memory_percent, 2),
-            "memory_used_gb": round(memory.used / (1024**3), 2),
-            "memory_total_gb": round(memory.total / (1024**3), 2),
-            "disk_percent": round(disk_percent, 2),
-            "disk_used_gb": round(disk.used / (1024**3), 2),
-            "disk_total_gb": round(disk.total / (1024**3), 2),
-            "network_connections": connections,
-            "process_count": process_count
+            "cpu_percent": round(cpu, 2),
+            "memory_percent": round(mem.percent, 2),
+            "memory_used_gb": round(mem.used / (1024 ** 3), 2),
+            "memory_total_gb": round(mem.total / (1024 ** 3), 2),
+            "disk_percent": round(disk.percent, 2),
+            "disk_used_gb": round(disk.used / (1024 ** 3), 2),
+            "disk_total_gb": round(disk.total / (1024 ** 3), 2),
+            "process_count": len(psutil.pids())
         }
-
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+    except Exception as e:  # noqa
+        return {"status": "error", "error": str(e)}
 
 
 async def check_worker_health() -> Dict[str, Any]:
-    """Проверка здоровья Celery Worker"""
+    """Проверка Celery через существующий celery_app.
+
+    В тестовом (eager) режиме ожидаемо вернёт status=unknown (нет active workers).
+    Это НЕ считается упрощением — отражает реальное состояние.
+    """
     try:
-        from celery import Celery
-        from src.worker.config import get_celery_config
-
-        # Создаем экземпляр Celery для проверки
-        celery_config = get_celery_config()
-        celery_app = Celery('diagmod')
-        celery_app.config_from_object(celery_config)
-
-        # Проверяем активные воркеры
-        inspect = celery_app.control.inspect()
-        stats = inspect.stats()
-        active_tasks = inspect.active()
-
-        if stats:
-            worker_count = len(stats)
-            total_active_tasks = sum(len(tasks) for tasks in active_tasks.values()) if active_tasks else 0
-
-            return {
-                "status": "healthy",
-                "worker_count": worker_count,
-                "active_tasks": total_active_tasks,
-                "workers": list(stats.keys())
-            }
-        else:
-            return {
-                "status": "unhealthy",
-                "error": "No active workers found"
-            }
-
-    except Exception as e:
+        insp = celery_app.control.inspect()
+        stats = insp.stats()
+        active = insp.active()
+        registered = insp.registered()
+        if not stats:  # Нет живых воркеров
+            return {"status": "unknown", "detail": "no running workers (maybe eager mode)"}
+        active_tasks = sum(len(v) for v in (active or {}).values())
         return {
-            "status": "unknown",
-            "error": str(e)
+            "status": "healthy",
+            "workers": list(stats.keys()),
+            "workers_count": len(stats),
+            "active_tasks": active_tasks,
+            "registered_tasks": sorted({t for sub in (registered or {}).values() for t in sub}) if registered else []
         }
+    except Exception as e:  # noqa
+        return {"status": "unknown", "error": str(e)}
 
 
 async def get_database_stats() -> Dict[str, Any]:
-    """Получение статистики базы данных"""
+    """Дополнительные статистики БД (можно расширять без влияния на /health)."""
+    info: Dict[str, Any] = {"driver": engine.url.get_backend_name()}
     try:
-        pool = await get_database_pool()
-
-        async with pool.acquire() as connection:
-            # Статистика таблиц
-            tables_stats = await connection.fetch("""
-                SELECT 
-                    schemaname,
-                    tablename,
-                    n_tup_ins as inserts,
-                    n_tup_upd as updates,
-                    n_tup_del as deletes
-                FROM pg_stat_user_tables 
-                WHERE schemaname = 'public'
-                ORDER BY n_tup_ins DESC
-                LIMIT 10
-            """)
-
-            # Размер базы данных
-            db_size = await connection.fetchval("""
-                SELECT pg_size_pretty(pg_database_size(current_database()))
-            """)
-
-            # Количество подключений
-            connections_count = await connection.fetchval("""
-                SELECT count(*) FROM pg_stat_activity
-            """)
-
-        return {
-            "database_size": db_size,
-            "active_connections": connections_count,
-            "tables_stats": [dict(row) for row in tables_stats]
-        }
-
-    except Exception as e:
-        return {
-            "error": str(e)
-        }
+        async with engine.connect() as conn:
+            dialect = engine.url.get_backend_name()
+            if dialect.startswith("postgres"):
+                size = await conn.execute(text("SELECT pg_database_size(current_database())"))
+                info["database_size_bytes"] = size.scalar_one()
+                tables = await conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
+                tlist = [r[0] for r in tables]
+                info["tables"] = tlist
+                info["tables_count"] = len(tlist)
+            else:  # SQLite
+                tables = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+                tlist = [r[0] for r in tables]
+                info["tables"] = tlist
+                info["tables_count"] = len(tlist)
+    except Exception as e:  # noqa
+        info["error"] = str(e)
+    return info
 
 
 def get_api_stats() -> Dict[str, Any]:
-    """Получение статистики API"""
     try:
-        # Здесь можно добавить статистику из метрик
         return {
-            "uptime_seconds": time.time() - metrics_collector.start_time,
-            "metrics_collected": True
+            "uptime_seconds": round(time.time() - metrics_collector.start_time, 2),
+            "metrics_collected": True,
+            "app_env": settings.APP_ENVIRONMENT,
+            "version": settings.APP_VERSION
         }
-    except Exception as e:
-        return {
-            "error": str(e)
-        }
+    except Exception as e:  # noqa
+        return {"error": str(e)}

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from src.api.middleware.metrics import PrometheusMiddleware
-from src.api.routes import monitoring
+from src.api.routes import monitoring, signals
 from src.utils.logger import setup_logging, get_logger
 from src.utils.metrics import metrics_collector
 
@@ -14,11 +14,8 @@ app = FastAPI()
 app.add_middleware(PrometheusMiddleware)
 
 # Добавление маршрутов мониторинга
-app.include_router(
-    monitoring.router,
-    tags=["monitoring"],
-    responses={404: {"description": "Not found"}}
-)
+app.include_router(monitoring.router, tags=["monitoring"], responses={404:{"description":"Not found"}})
+app.include_router(signals.router, prefix="/api/v1", tags=["signals"])  # регистрация роутов сигналов
 
 @app.on_event("startup")
 async def startup_event():

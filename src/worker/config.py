@@ -88,11 +88,11 @@ def create_celery_app() -> Celery:
             },
 
             # Пакетные задачи - низкий приоритет
-            'src.worker.tasks.specialized_tasks.batch_process_directory': {
+            'src.worker.specialized_tasks.batch_process_directory': {
                 'queue': 'batch',
                 'routing_key': 'batch'
             },
-            'src.worker.tasks.specialized_tasks.process_equipment_workflow': {
+            'src.worker.specialized_tasks.process_equipment_workflow': {
                 'queue': 'batch',
                 'routing_key': 'batch'
             },
@@ -102,11 +102,11 @@ def create_celery_app() -> Celery:
                 'queue': 'maintenance',
                 'routing_key': 'maintenance'
             },
-            'src.worker.tasks.specialized_tasks.health_check_system': {
+            'src.worker.specialized_tasks.health_check_system': {
                 'queue': 'monitoring',
                 'routing_key': 'monitoring'
             },
-            'src.worker.tasks.specialized_tasks.daily_equipment_report': {
+            'src.worker.specialized_tasks.daily_equipment_report': {
                 'queue': 'monitoring',
                 'routing_key': 'monitoring'
             }
@@ -173,14 +173,14 @@ def create_celery_app() -> Celery:
 
             # Проверка здоровья системы каждые 15 минут
             'health-check': {
-                'task': 'src.worker.tasks.specialized_tasks.health_check_system',
+                'task': 'src.worker.specialized_tasks.health_check_system',
                 'schedule': 900.0,
                 'options': {'queue': 'monitoring'}
             },
 
             # Ежедневный отчет в 8:00 UTC
             'daily-report': {
-                'task': 'src.worker.tasks.specialized_tasks.daily_equipment_report',
+                'task': 'src.worker.specialized_tasks.daily_equipment_report',
                 'schedule': 86400.0,
                 'options': {'queue': 'monitoring'}
             }
@@ -190,7 +190,7 @@ def create_celery_app() -> Celery:
     # Автоматическое обнаружение задач
     celery_app.autodiscover_tasks([
         'src.worker.tasks',
-        'src.worker.tasks.specialized_tasks'
+    'src.worker.specialized_tasks'
     ])
 
     return celery_app
@@ -222,9 +222,8 @@ def setup_worker_signals(celery_app: Celery):
 @setup_logging.connect
 def setup_celery_logging(**kwargs):
     """Настройка логирования для Celery"""
-    # Используем наш собственный логгер
-        # Локальная функция оставлена для совместимости; настройка логгера централизована в src.utils.logger
-        return None
+    # Локальная функция оставлена для совместимости; логгер уже настроен в src.utils.logger
+    return None
 
 
 def get_worker_info() -> Dict[str, Any]:

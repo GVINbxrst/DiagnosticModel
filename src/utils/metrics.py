@@ -27,9 +27,9 @@ def increment_counter(name: str, labels: Optional[Dict[str, str]] = None, value:
         logger.warning(f"Метрика {name} не найдена для increment_counter")
         return
     if labels:
-    metric.labels(**labels).inc(value)
+        metric.labels(**labels).inc(value)
     else:
-    metric.inc(value)
+        metric.inc(value)
 
 def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None):
     metric = globals().get(name)
@@ -108,28 +108,7 @@ def observe_latency(metric_name: str, labels: Optional[Dict[str, str]] = None):
     return decorator
 
 
-def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    """Установить значение gauge метрики."""
-    metric = globals().get(name)
-    if metric is None:
-        logger.warning(f"Метрика {name} не найдена для set_gauge")
-        return
-    try:
-        if labels:
-            metric.labels(**labels).set(value)
-        else:
-            metric.set(value)
-    except Exception as e:
-        logger.debug(f"Не удалось установить gauge {name}: {e}")
-
-
-def track_worker_task(task_name: str, status: str, duration_seconds: float):
-    """Хелпер для задач воркера: обновить счетчик и гистограмму по задаче."""
-    try:
-        worker_tasks_total.labels(task_name=task_name, status=status).inc()
-        worker_task_duration_seconds.labels(task_name=task_name).observe(duration_seconds)
-    except Exception as e:
-        logger.debug(f"Не удалось обновить метрики воркера {task_name}: {e}")
+## Удалены дублирующие определения set_gauge/track_worker_task (оставлены ранние версии выше)
 
 # Основные метрики для API
 api_requests_total = Counter(

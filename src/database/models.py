@@ -12,8 +12,7 @@ from sqlalchemy import (
     func, ForeignKey, Index
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, declarative_base
 
 # Базовый класс для всех моделей
 Base = declarative_base()
@@ -123,6 +122,13 @@ class DefectType(Base):
     )
 
 
+class ProcessingStatus(PyEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class RawSignal(Base, TimestampMixin):
     """Сырые токовые сигналы"""
     __tablename__ = "raw_signals"
@@ -151,6 +157,9 @@ class RawSignal(Base, TimestampMixin):
 
     # Статус обработки
     processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    processing_status: Mapped[ProcessingStatus] = mapped_column(
+        Enum(ProcessingStatus), nullable=False, default=ProcessingStatus.PENDING
+    )
 
     # Связи
     equipment = relationship("Equipment", back_populates="raw_signals")
@@ -227,13 +236,14 @@ class Feature(Base, TimestampMixin):
     # Связи
     raw_signal = relationship("RawSignal", back_populates="features")
     predictions = relationship("Prediction", back_populates="feature")
-
     # Индексы
     __table_args__ = (
         Index('idx_features_raw_id', 'raw_id'),
         Index('idx_features_window_start', 'window_start'),
         Index('idx_features_window_range', 'window_start', 'window_end'),
     )
+
+## ProcessingStatus уже определён на верхнем уровне
 
 
 class Prediction(Base, TimestampMixin):

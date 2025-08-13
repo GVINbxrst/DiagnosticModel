@@ -10,87 +10,33 @@ Celery задачи для фоновой обработки данных диа
 
 import asyncio
 import json
-import traceback
-import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from uuid import UUID
 
 import numpy as np
-from celery import Celery, Task
-from celery.exceptions import Retry, MaxRetriesExceededError
+from celery import Task
 from celery.signals import worker_ready, worker_shutdown
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from src.config.settings import get_settings
 from src.database.connection import get_async_session
 from src.database.models import (
     RawSignal, Feature, Equipment, Prediction,
-    ProcessingStatus, DefectType
+    ProcessingStatus
 )
 from src.data_processing.feature_extraction import FeatureExtractor
 from src.ml.train import load_latest_models
 from src.ml.forecasting import RMSTrendForecaster
-from src.utils.logger import get_logger
-from src.worker.celery_app import celery_app
-from src.worker.monitoring import track_task_metrics, get_worker_metrics_collector
-from src.utils.metrics import (
-    # оставляем существующие импорты метрик если используются далее
-    track_csv_processing, track_anomaly_detection,
-    track_forecast_generation, increment_counter, observe_histogram
-)
-from src.utils.serialization import load_float32_array, dump_float32_array
+from src.utils.logger import get_logger, get_audit_logger
+from src.worker.config import celery_app
+from src.utils.serialization import load_float32_array
 from src.utils.metrics import observe_latency as _observe_latency
 
 # Настройки
 settings = get_settings()
 logger = get_logger(__name__)
 audit_logger = get_audit_logger()
-
-# Инициализируем мониторинг Worker
-worker_metrics = get_worker_metrics_collector()
-
-# Конфигурация Celery
-celery_app = Celery(
-    'diagmod_worker',
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
-    include=['src.worker.tasks']
-)
-
-# Настройки Celery
-celery_app.conf.update(
-    task_serializer='json',
-    accept_content=['json'],
-    result_serializer='json',
-    timezone='UTC',
-    enable_utc=True,
-    task_track_started=True,
-    task_time_limit=3600,  # 1 час максимум на задачу
-    task_soft_time_limit=3300,  # 55 минут мягкий лимит
-    worker_prefetch_multiplier=1,
-    task_acks_late=True,
-    worker_disable_rate_limits=False,
-    task_compression='gzip',
-    result_compression='gzip',
-    task_routes={
-        'src.worker.tasks.process_raw': {'queue': 'processing'},
-        'src.worker.tasks.detect_anomalies': {'queue': 'ml'},
-        'src.worker.tasks.forecast_trend': {'queue': 'ml'},
-        'src.worker.tasks.cleanup_old_data': {'queue': 'maintenance'},
-    },
-    beat_schedule={
-        'cleanup-old-data': {
-            'task': 'src.worker.tasks.cleanup_old_data',
-            'schedule': 3600.0,  # Каждый час
-        },
-        'retrain-models': {
-            'task': 'src.worker.tasks.retrain_models',
-            'schedule': 24 * 3600.0,  # Каждый день
-        },
-    }
-)
 
 
 class DatabaseTask(Task):
@@ -180,9 +126,8 @@ def process_raw(self, raw_id: str) -> Dict:
     self.logger.info(f"Начинаем обработку сырого сигнала {raw_id}")
 
     try:
-        # Запускаем асинхронную обработку
-        # Измеряем через observe_latency вручную (Celery не async)
-    result = asyncio.run(_process_raw_async(raw_id))
+        # Запускаем асинхронную обработку (Celery синхронен)
+        result = asyncio.run(_process_raw_async(raw_id))
 
         processing_time = (datetime.utcnow() - task_start).total_seconds()
         result['processing_time_seconds'] = processing_time
@@ -251,8 +196,7 @@ async def _process_raw_async(raw_id: str) -> Dict:
             feature_ids = await extractor.process_raw_signal(
                 raw_signal_id=UUID(raw_id),
                 window_duration_ms=1000,  # Окна по 1 секунде
-                overlap_ratio=0.5,        # 50% перекрытие
-                session=session
+                overlap_ratio=0.5         # 50% перекрытие
             )
 
             # Обновляем статус на "завершено"
@@ -275,27 +219,22 @@ async def _process_raw_async(raw_id: str) -> Dict:
             raise
 
 
-async def _update_signal_status(
-    raw_id: str,
-    status: ProcessingStatus,
-    error_message: Optional[str] = None
-):
-    """Обновление статуса обработки сигнала"""
+async def _update_signal_status(raw_id: str, status: ProcessingStatus, error_message: Optional[str] = None):
+    """Обновление статуса RawSignal; ошибки складываем в meta['error']."""
     async with get_async_session() as session:
-        update_data = {
-            'processing_status': status,
-            'updated_at': datetime.utcnow()
-        }
-
+        rs = await session.get(RawSignal, UUID(raw_id))
+        if not rs:
+            return
+        rs.processing_status = status
+        if status == ProcessingStatus.COMPLETED:
+            rs.processed = True
         if error_message:
-            update_data['error_message'] = error_message
-
-        query = update(RawSignal).where(
-            RawSignal.id == UUID(raw_id)
-        ).values(**update_data)
-
-        await session.execute(query)
-        await session.commit()
+            meta = rs.meta or {}
+            meta['error'] = error_message
+            rs.meta = meta
+    await session.flush()
+    await session.commit()
+    await session.commit()
 
 
 @_observe_latency('worker_task_duration_seconds', labels={'task_name':'detect_anomalies'})
@@ -693,7 +632,7 @@ def retrain_models(self) -> Dict:
 
 async def _retrain_models_async() -> Dict:
     """Асинхронное переобучение моделей"""
-
+    from src.ml.train import AnomalyModelTrainer
     trainer = AnomalyModelTrainer()
 
     # Обучаем на всех доступных данных
