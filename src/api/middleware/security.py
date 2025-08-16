@@ -278,10 +278,11 @@ class EnhancedJWTHandler:
         await self._save_session(user, session_id, refresh_token, request)
 
         # Логируем успешный вход
+        role_value = getattr(user.role, 'value', user.role)
         await self.audit_logger.log_action(
             user_id=user.id,
             username=user.username,
-            user_role=user.role.value,
+            user_role=role_value,
             action_type=AuditActionType.LOGIN,
             result=AuditResult.SUCCESS,
             request=request,
@@ -333,7 +334,7 @@ class EnhancedJWTHandler:
                 await self.audit_logger.log_action(
                     user_id=user_id,
                     username=user.username if user else "unknown",
-                    user_role=user.role.value if user else "unknown",
+                    user_role=getattr(user.role, 'value', user.role) if user else "unknown",
                     action_type=AuditActionType.TOKEN_REFRESH,
                     result=AuditResult.FAILURE,
                     request=request,
@@ -349,7 +350,7 @@ class EnhancedJWTHandler:
                 await self.audit_logger.log_action(
                     user_id=user.id,
                     username=user.username,
-                    user_role=user.role.value,
+                    user_role=getattr(user.role, 'value', user.role),
                     action_type=AuditActionType.TOKEN_REFRESH,
                     result=AuditResult.FAILURE,
                     request=request,
@@ -371,7 +372,7 @@ class EnhancedJWTHandler:
         await self.audit_logger.log_action(
             user_id=user.id,
             username=user.username,
-            user_role=user.role.value,
+            user_role=getattr(user.role, 'value', user.role),
             action_type=AuditActionType.TOKEN_REFRESH,
             result=AuditResult.SUCCESS,
             request=request,
@@ -423,10 +424,11 @@ class EnhancedJWTHandler:
 
         expire = datetime.utcnow() + timedelta(minutes=self.access_token_expire)
 
+        role_value = user.role.value if hasattr(user.role, 'value') else str(user.role)
         payload = {
             "sub": str(user.id),
             "username": user.username,
-            "role": user.role.value,
+            "role": role_value,
             "session_id": session_id,
             "type": "access",
             "exp": expire,

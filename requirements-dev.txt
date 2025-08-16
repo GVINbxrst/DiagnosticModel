@@ -17,6 +17,9 @@ pytest-benchmark==4.0.0
 factory-boy==3.3.0
 faker==20.1.0
 
+# Для JWT тестов (совпадает с prod requirements)
+PyJWT==2.9.0
+
 # Мок-объекты для тестирования
 responses==0.24.1
 fakeredis==2.20.1

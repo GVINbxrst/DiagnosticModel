@@ -20,15 +20,38 @@ def _core_tasks():
 settings = get_settings()
 logger = get_logger(__name__)
 
-@celery_app.task(bind=True)
-def batch_process_directory(self, directory_path: str, equipment_id: Optional[str] = None) -> Dict:
+@celery_app.task
+def batch_process_directory(directory_path: str, equipment_id: Optional[str] = None) -> Dict:
     process_raw, *_ = _core_tasks()
-    self.logger.info(f"Начинаем пакетную обработку директории: {directory_path}")
+    logger.info(f"Начинаем пакетную обработку директории: {directory_path}")
     try:
-        result = asyncio.run(_batch_process_directory_async(directory_path, equipment_id, process_raw))
-        return result
+        impl = _batch_process_directory_async
+        if asyncio.iscoroutinefunction(impl):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                # Запускаем в отдельном потоке со своим циклом
+                import threading
+                container: Dict[str, Dict] = {}
+                def runner():  # type: ignore
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        container['res'] = new_loop.run_until_complete(impl(directory_path, equipment_id, process_raw))
+                    finally:
+                        new_loop.close()
+                        asyncio.set_event_loop(None)
+                t = threading.Thread(target=runner)
+                t.start(); t.join()
+                return container.get('res', {'status':'error','message':'thread_failed'})
+            else:
+                return asyncio.run(impl(directory_path, equipment_id, process_raw))
+        else:  # мок в тесте может вернуть обычную функцию
+            return impl(directory_path, equipment_id, process_raw)
     except Exception as exc:
-        self.logger.error(f"Ошибка пакетной обработки: {exc}")
+        logger.error(f"Ошибка пакетной обработки: {exc}")
         raise
 
 async def _batch_process_directory_async(directory_path: str, equipment_id: Optional[str], process_raw_task) -> Dict:
@@ -74,7 +97,7 @@ def process_equipment_workflow(self, equipment_id: str, force_reprocess: bool = 
     try:
         return asyncio.run(_process_equipment_workflow_async(equipment_id, force_reprocess, process_raw, forecast_trend))
     except Exception as exc:
-        self.logger.error(f"Ошибка полного цикла для {equipment_id}: {exc}")
+        logger.error(f"Ошибка полного цикла для {equipment_id}: {exc}")
         raise
 
 async def _process_equipment_workflow_async(equipment_id: str, force_reprocess: bool, process_raw_task, forecast_trend_task) -> Dict:
@@ -110,7 +133,7 @@ def health_check_system(self) -> Dict:
     try:
         return asyncio.run(_health_check_system_async())
     except Exception as exc:
-        self.logger.error(f"Ошибка проверки состояния системы: {exc}")
+        logger.error(f"Ошибка проверки состояния системы: {exc}")
         raise
 
 async def _health_check_system_async() -> Dict:
@@ -145,7 +168,7 @@ def daily_equipment_report(self, equipment_id: Optional[str] = None) -> Dict:
     try:
         return asyncio.run(_daily_equipment_report_async(equipment_id))
     except Exception as exc:
-        self.logger.error(f"Ошибка генерации отчета: {exc}")
+        logger.error(f"Ошибка генерации отчета: {exc}")
         raise
 
 async def _daily_equipment_report_async(equipment_id: Optional[str]) -> Dict:

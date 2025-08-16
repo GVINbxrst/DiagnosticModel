@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     def models_path(self) -> Path:
         return Path(self.MODELS_PATH)
 
+    @models_path.setter  # type: ignore
+    def models_path(self, value: Path | str):  # Позволяет monkeypatch в тестах
+        # Pydantic BaseSettings неизменяема по умолчанию, но тест использует monkeypatch.setattr.
+        # Сохраняем совместимость, устанавливая базовое поле.
+        object.__setattr__(self, 'MODELS_PATH', str(value))
+
     @property
     def log_file_path(self) -> Optional[Path]:
         return Path(self.LOG_FILE_PATH) if self.LOG_FILE_PATH else None

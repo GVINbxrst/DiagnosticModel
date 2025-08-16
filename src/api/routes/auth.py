@@ -53,7 +53,7 @@ async def login(
         await audit_logger.log_action(
             user_id=user.id,
             username=user.username,
-            user_role=user.role.value,
+            user_role=getattr(user.role, 'value', user.role),
             action_type=AuditActionType.FAILED_LOGIN,
             result=AuditResult.DENIED,
             request=request,
@@ -68,7 +68,7 @@ async def login(
     # Создаем сессию с токенами (логирование внутри enhanced_jwt_handler)
     token_data = await enhanced_jwt_handler.create_session(user, request)
 
-    logger.info(f"Успешная авторизация пользователя: {user.username} (роль: {user.role.value})")
+    logger.info(f"Успешная авторизация пользователя: {user.username} (роль: {getattr(user.role, 'value', user.role)})")
     
     return TokenResponse(**token_data)
 
@@ -124,7 +124,7 @@ async def logout(
         await audit_logger.log_action(
             user_id=current_user.id,
             username=current_user.username,
-            user_role=current_user.role.value,
+            user_role=getattr(current_user.role, 'value', current_user.role),
             action_type=AuditActionType.LOGOUT,
             result=AuditResult.SUCCESS,
             request=request
@@ -159,7 +159,7 @@ async def revoke_session(
         await audit_logger.log_action(
             user_id=current_user.id,
             username=current_user.username,
-            user_role=current_user.role.value,
+            user_role=getattr(current_user.role, 'value', current_user.role),
             action_type=AuditActionType.PERMISSION_DENIED,
             result=AuditResult.DENIED,
             request=request,

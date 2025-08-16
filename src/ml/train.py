@@ -206,6 +206,10 @@ class FeaturePreprocessor:
         Returns:
             Кортеж (обработанные признаки, список названий признаков)
         """
+    # Замечание: первоначально проверка MIN_SAMPLES выполнялась до базовой валидации,
+    # что приводило к выбросу InsufficientDataError вместо ожидаемого тестом ValueError,
+    # когда отсутствуют нужные признаки. Сначала определим доступные признаки, затем проверим размер.
+
         # Извлекаем статистические признаки
         feature_columns = [
             'rms_a', 'rms_b', 'rms_c',
@@ -223,6 +227,12 @@ class FeaturePreprocessor:
 
         if len(available_features) == 0:
             raise ValueError("Не найдено признаков для обучения")
+
+        # Теперь выполняем глобальную проверку достаточности данных после проверки наличия признаков
+        if len(features_df) < MIN_SAMPLES_FOR_TRAINING:
+            raise InsufficientDataError(
+                f"Недостаточно данных для обучения: {len(features_df)} < {MIN_SAMPLES_FOR_TRAINING}"
+            )
 
         # Извлекаем данные признаков
         X = features_df[available_features].copy()
@@ -393,14 +403,29 @@ class AnomalyDetectionModels:
         self.dbscan = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
         self.dbscan_labels = self.dbscan.fit_predict(X)
 
-        # Анализируем результаты кластеризации
-        n_clusters = len(set(self.dbscan_labels)) - (1 if -1 in self.dbscan_labels else 0)
-        n_noise = list(self.dbscan_labels).count(-1)
-        noise_ratio = n_noise / len(X)
+        def _report(labels, attempt_tag: str = "primary"):
+            n_clusters_local = len(set(labels)) - (1 if -1 in labels else 0)
+            n_noise_local = list(labels).count(-1)
+            noise_ratio_local = n_noise_local / len(labels)
+            self.logger.info(
+                f"DBSCAN({attempt_tag}): найдено {n_clusters_local} кластеров, {n_noise_local} аномалий ({noise_ratio_local:.2%})"
+            )
+            return n_clusters_local
 
-        self.logger.info(
-            f"DBSCAN: найдено {n_clusters} кластеров, {n_noise} аномалий ({noise_ratio:.2%})"
-        )
+        n_clusters = _report(self.dbscan_labels)
+        # Fallback: если ни одного кластера (всё шум) – ослабляем параметры и пробуем ещё раз.
+        if n_clusters == 0:
+            relaxed_eps = eps * 1.5
+            relaxed_min_samples = max(2, int(min_samples * 0.5))
+            try:
+                self.logger.info(
+                    f"DBSCAN fallback: пересобираем с eps={relaxed_eps}, min_samples={relaxed_min_samples}"
+                )
+                self.dbscan = DBSCAN(eps=relaxed_eps, min_samples=relaxed_min_samples, n_jobs=-1)
+                self.dbscan_labels = self.dbscan.fit_predict(X)
+                n_clusters = _report(self.dbscan_labels, attempt_tag="fallback")
+            except Exception as e:
+                self.logger.warning(f"DBSCAN fallback ошибка: {e}")
 
         # Вычисляем silhouette score если есть кластеры
         if n_clusters > 1:

@@ -62,7 +62,13 @@ class TestCSVUtilityFunctions:
         # Проверяем, что NaN значения сохранились
         assert np.isnan(decompressed[1])
         assert np.isnan(decompressed[3])
-        np.testing.assert_array_equal(data_with_nan, decompressed, equal_nan=True)
+        # numpy 2.x: assert_array_equal не принимает equal_nan; используем сравнение через isnan
+        assert data_with_nan.shape == decompressed.shape
+        for a,b in zip(data_with_nan, decompressed):
+            if np.isnan(a):
+                assert np.isnan(b)
+            else:
+                assert a == b
 
     def test_parse_csv_header_valid(self):
         """Тест парсинга корректного заголовка"""

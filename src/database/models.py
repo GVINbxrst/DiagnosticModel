@@ -12,7 +12,49 @@ from sqlalchemy import (
     func, ForeignKey, Index
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.orm import Mapped, mapped_column, relationship, declarative_base
+
+# Компиляция JSONB для SQLite (тестовый режим) -> JSON (текст)
+@compiles(JSONB, 'sqlite')
+def compile_jsonb_sqlite(type_, compiler, **kw):  # pragma: no cover - инфраструктурный слой
+    return 'JSON'
+
+# Универсальный UUID тип для Postgres/SQLite: хранит UUID как native UUID в PG и как текст (36) в SQLite.
+class UniversalUUID(TypeDecorator):  # pragma: no cover - инфраструктурный слой
+    impl = CHAR(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        return dialect.type_descriptor(CHAR(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, UUID):
+            return value if dialect.name == 'postgresql' else str(value)
+        if isinstance(value, str):
+            from uuid import UUID as _UUID
+            try:
+                u = _UUID(value)
+            except Exception as e:  # pragma: no cover
+                raise TypeError(f"Invalid UUID string '{value}': {e}") from e
+            return u if dialect.name == 'postgresql' else str(u)
+        raise TypeError(f"Unsupported UUID value type: {type(value)}")
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, UUID):
+            return value
+        from uuid import UUID as _UUID
+        try:
+            return _UUID(str(value))
+        except Exception as e:  # pragma: no cover
+            raise TypeError(f"Invalid UUID value from DB '{value}': {e}") from e
 
 # Базовый класс для всех моделей
 Base = declarative_base()
@@ -66,12 +108,12 @@ class User(Base, TimestampMixin):
     """Пользователи системы"""
     __tablename__ = "users"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[Optional[str]] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False, default=UserRole.VIEWER)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole, values_callable=lambda c: [e.value for e in c]), nullable=False, default=UserRole.VIEWER)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
@@ -80,12 +122,12 @@ class Equipment(Base, TimestampMixin):
     """Оборудование (двигатели, насосы и т.д.)"""
     __tablename__ = "equipment"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     equipment_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    type: Mapped[EquipmentType] = mapped_column(Enum(EquipmentType), nullable=False)
+    type: Mapped[EquipmentType] = mapped_column(Enum(EquipmentType, values_callable=lambda c: [e.value for e in c]), nullable=False)
     status: Mapped[EquipmentStatus] = mapped_column(
-        Enum(EquipmentStatus),
+        Enum(EquipmentStatus, values_callable=lambda c: [e.value for e in c]),
         nullable=False,
         default=EquipmentStatus.INACTIVE
     )
@@ -104,13 +146,12 @@ class DefectType(Base):
     """Типы дефектов"""
     __tablename__ = "defect_types"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     code: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     category: Mapped[Optional[str]] = mapped_column(String(100))
-    default_severity: Mapped[DefectSeverity] = mapped_column(
-        Enum(DefectSeverity),
+    default_severity: Mapped[DefectSeverity] = mapped_column(Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c]),
         nullable=False,
         default=DefectSeverity.MEDIUM
     )
@@ -133,9 +174,9 @@ class RawSignal(Base, TimestampMixin):
     """Сырые токовые сигналы"""
     __tablename__ = "raw_signals"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     equipment_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UniversalUUID(),
         ForeignKey("equipment.id", ondelete="CASCADE"),
         nullable=False
     )
@@ -158,7 +199,9 @@ class RawSignal(Base, TimestampMixin):
     # Статус обработки
     processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processing_status: Mapped[ProcessingStatus] = mapped_column(
-        Enum(ProcessingStatus), nullable=False, default=ProcessingStatus.PENDING
+        Enum(ProcessingStatus, values_callable=lambda c: [e.value for e in c]),
+        nullable=False,
+        default=ProcessingStatus.PENDING
     )
 
     # Связи
@@ -178,9 +221,9 @@ class Feature(Base, TimestampMixin):
     """Извлеченные признаки"""
     __tablename__ = "features"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     raw_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UniversalUUID(),
         ForeignKey("raw_signals.id", ondelete="CASCADE"),
         nullable=False
     )
@@ -250,20 +293,23 @@ class Prediction(Base, TimestampMixin):
     """Прогнозы и детекция аномалий"""
     __tablename__ = "predictions"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     feature_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UniversalUUID(),
         ForeignKey("features.id", ondelete="CASCADE"),
         nullable=False
     )
+    equipment_id: Mapped[Optional[UUID]] = mapped_column(UniversalUUID(), nullable=True, index=True)
     defect_type_id: Mapped[Optional[UUID]] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UniversalUUID(),
         ForeignKey("defect_types.id")
     )
 
     # Результаты предсказания
     probability: Mapped[float] = mapped_column(Numeric(precision=5, scale=4), nullable=False)
-    predicted_severity: Mapped[Optional[DefectSeverity]] = mapped_column(Enum(DefectSeverity))
+    predicted_severity: Mapped[Optional[DefectSeverity]] = mapped_column(
+        Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c])
+    )
     confidence_score: Mapped[Optional[float]] = mapped_column(Numeric(precision=5, scale=4))
 
     # Информация о модели
@@ -292,12 +338,12 @@ class SystemLog(Base):
     """Системные логи"""
     __tablename__ = "system_logs"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     level: Mapped[str] = mapped_column(String(20), nullable=False)
     module: Mapped[str] = mapped_column(String(100), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     details: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
-    user_id: Mapped[Optional[UUID]] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"))
+    user_id: Mapped[Optional[UUID]] = mapped_column(UniversalUUID(), ForeignKey("users.id"))
     ip_address: Mapped[Optional[str]] = mapped_column(String(45))  # IPv6 support
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -320,9 +366,9 @@ class UserSession(Base):
     """Пользовательские сессии"""
     __tablename__ = "user_sessions"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+        UniversalUUID(),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False
     )

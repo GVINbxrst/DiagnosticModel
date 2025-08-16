@@ -66,8 +66,19 @@ async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: f
     from src.database.models import Feature, RawSignal
 
     async with get_async_session() as session:
-        # Join Feature -> RawSignal чтобы фильтровать по equipment_id
-        q = select(Feature).join(RawSignal).where(RawSignal.equipment_id == equipment_id).order_by(Feature.window_start.asc())
+        # Join Feature -> RawSignal. В тестовой среде на SQLite UUID могут храниться как TEXT.
+        # Унифицируем сравнение через строковое представление если dialect == 'sqlite'.
+        from sqlalchemy import cast, String
+        if session.bind.dialect.name == 'sqlite':  # pragma: no cover - специфично для тестов sqlite
+            q = (select(Feature)
+                 .join(RawSignal)
+                 .where(cast(RawSignal.equipment_id, String) == str(equipment_id))
+                 .order_by(Feature.window_start.asc()))
+        else:
+            q = (select(Feature)
+                 .join(RawSignal)
+                 .where(RawSignal.equipment_id == equipment_id)
+                 .order_by(Feature.window_start.asc()))
         res = await session.execute(q)
         feats = res.scalars().all()
 

@@ -8,14 +8,12 @@ Celery Worker модуль для фоновой обработки данных
 """
 
 from src.worker.config import celery_app, get_worker_info
-from src.worker.tasks import process_raw, detect_anomalies, forecast_trend, cleanup_old_data, retrain_models
+
+# Задачи не импортируем напрямую, чтобы избежать цикла с пакетом tasks.
+# Пользователи должны импортировать их из src.worker.tasks
 
 __all__ = [
     'celery_app',
     'get_worker_info',
-    'process_raw',
-    'detect_anomalies',
-    'forecast_trend',
-    'cleanup_old_data',
-    'retrain_models'
+    # задачи экспортируются через пакет tasks
 ]
