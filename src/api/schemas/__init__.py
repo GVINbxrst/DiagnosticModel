@@ -2,7 +2,7 @@
 Pydantic схемы для API запросов и ответов
 """
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from uuid import UUID
@@ -55,8 +55,8 @@ class UserInfo(BaseModel):
     is_active: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    # Pydantic v2 style config
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Схемы загрузки файлов

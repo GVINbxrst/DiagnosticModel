@@ -7,13 +7,16 @@ import json
 import logging
 import logging.config
 import sys
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, Optional
 import traceback
 
 import structlog
-from pythonjsonlogger import jsonlogger
+try:  # Prefer new location to avoid deprecation
+    from pythonjsonlogger import json as jsonlogger  # type: ignore
+except Exception:  # fallback to old path
+    from pythonjsonlogger import jsonlogger  # type: ignore
 
 from src.config.settings import get_settings
 
@@ -26,7 +29,8 @@ class CustomJSONFormatter(jsonlogger.JsonFormatter):
 
         # Добавляем временную метку в ISO формате
         if not log_record.get('timestamp'):
-            log_record['timestamp'] = datetime.utcnow().isoformat() + 'Z'
+            # Используем timezone-aware UTC вместо устаревшего utcnow
+            log_record['timestamp'] = datetime.now(UTC).isoformat().replace('+00:00', 'Z')
 
         # Добавляем информацию о модуле
         if record.name:
@@ -226,13 +230,14 @@ audit_logger = get_audit_logger()
 if __name__ == "__main__":
     # Тест системы логирования
     logger = get_logger(__name__)
-    struct_logger = get_structured_logger(__name__)
 
     logger.info("Тестирование стандартного логгера")
     logger.warning("Предупреждение с дополнительными данными", extra={"test": "value"})
     logger.error("Ошибка для тестирования")
 
-    struct_logger.info("Тестирование структурированного логгера", key="value", number=42)
-    struct_logger.warning("Структурированное предупреждение", module="test", action="log_test")
+    # Пример structured через structlog
+    s_logger = structlog.get_logger(__name__)
+    s_logger.info("Тестирование структурированного логгера", key="value", number=42)
+    s_logger.warning("Структурированное предупреждение", module="test", action="log_test")
 
     print("Тест логирования завершен")

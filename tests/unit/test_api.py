@@ -4,12 +4,13 @@
 
 import pytest
 import asyncio
-from httpx import AsyncClient
-from fastapi.testclient import TestClient
+import httpx
+from httpx import ASGITransport
 from unittest.mock import Mock, AsyncMock, patch
 from uuid import uuid4
 import json
 import io
+from datetime import datetime, timedelta, UTC
 
 from src.api.main import app
 from src.api.middleware.auth import jwt_handler
@@ -18,14 +19,30 @@ from src.database.models import User, Equipment, RawSignal
 
 @pytest.fixture
 def client():
-    """HTTP клиент для тестирования"""
-    return TestClient(app)
+    """Синхронная обёртка над AsyncClient для совместимости старых тестов."""
+    transport = ASGITransport(app=app)
+    async_client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    class SyncBridge:
+        def __init__(self, ac):
+            self._ac = ac
+            self.app = app
+        def get(self, *a, **kw):
+            return asyncio.run(self._ac.get(*a, **kw))
+        def post(self, *a, **kw):
+            return asyncio.run(self._ac.post(*a, **kw))
+        def put(self, *a, **kw):
+            return asyncio.run(self._ac.put(*a, **kw))
+        def delete(self, *a, **kw):
+            return asyncio.run(self._ac.delete(*a, **kw))
+    client_obj = SyncBridge(async_client)
+    return client_obj
 
 
 @pytest.fixture
 async def async_client():
-    """Асинхронный HTTP клиент"""
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    """Асинхронный HTTP клиент с явным ASGITransport"""
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
 
 
@@ -110,62 +127,65 @@ class TestHealthEndpoints:
 
 class TestSignalsEndpoints:
     """Тесты эндпоинтов сигналов"""
-
     def test_get_signal_data_success(self, client, auth_headers):
+        """Создаём реальный RawSignal в тестовой SQLite и запрашиваем через API."""
         from src.api.middleware import auth as auth_module
         from src.database.connection import get_async_session
-        from datetime import datetime
-        import numpy as np
-        from src.utils.serialization import dump_float32_array
         from src.database.models import ProcessingStatus
+        from src.utils.serialization import dump_float32_array
+        import numpy as np
 
-        # Авторизация override
         client.app.dependency_overrides[auth_module.require_any_role] = lambda: Mock(username="tester", id=uuid4())
 
-        # Мокаем RawSignal
-        mock_signal = Mock(spec=RawSignal)
-        mock_signal.id = uuid4()
-        mock_signal.equipment_id = uuid4()
-        mock_signal.sample_rate_hz = 25600
-        mock_signal.samples_count = 1000
-        mock_signal.metadata = {"original_filename": "test.csv"}
-        mock_signal.processing_status = ProcessingStatus.COMPLETED
-        mock_signal.recorded_at = datetime.utcnow()
-        mock_signal.file_hash = "hash123"
-
+        raw_id = uuid4()
+        equipment_id = uuid4()
         test_data = np.random.normal(0, 1, 64).astype(np.float32)
         compressed = dump_float32_array(test_data)
-        mock_signal.phase_a = compressed
-        mock_signal.phase_b = compressed
-        mock_signal.phase_c = None
 
-        # Мокаем сессию
-        mock_db_session = AsyncMock()
-        async def override_session():
-            yield mock_db_session
-        client.app.dependency_overrides[get_async_session] = override_session
+        async def seed():
+            async with get_async_session() as s:  # ensures schema
+                signal = RawSignal(
+                    id=raw_id,
+                    equipment_id=equipment_id,
+                    sample_rate_hz=25600,
+                    samples_count=1000,
+                    # Поле модели называется meta, не metadata
+                    meta={"original_filename": "test.csv"},
+                    processing_status=ProcessingStatus.COMPLETED,
+                    recorded_at=datetime.now(UTC),
+                    file_hash="hash123",
+                    phase_a=compressed,
+                    phase_b=compressed,
+                    phase_c=None
+                )
+                s.add(signal)
+                await s.commit()
 
-        mock_result = Mock()
-        mock_result.scalar_one_or_none.return_value = mock_signal
-        mock_db_session.execute.return_value = mock_result
+        asyncio.run(seed())
 
-        response = client.get(f"/api/v1/signals/{mock_signal.id}", headers=auth_headers)
+        response = client.get(f"/api/v1/signals/{raw_id}", headers=auth_headers)
         assert response.status_code == 200, response.text
-        data = response.json()
-        assert data["raw_signal_id"] == str(mock_signal.id)
-        assert len(data["phases"]) == 3
+        body = response.json()
+        assert body["raw_signal_id"] == str(raw_id)
+        assert len(body["phases"]) == 3
 
     def test_get_signal_data_not_found(self, client, auth_headers):
         from src.api.middleware import auth as auth_module
-        from src.database.connection import get_async_session
+        from src.database.connection import db_session, get_async_session
+
         client.app.dependency_overrides[auth_module.require_any_role] = lambda: Mock(username="tester", id=uuid4())
         mock_db_session = AsyncMock()
+
         async def override_session():
             yield mock_db_session
+
+        client.app.dependency_overrides[db_session] = override_session
         client.app.dependency_overrides[get_async_session] = override_session
+
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute.return_value = mock_result
+
         signal_id = uuid4()
         response = client.get(f"/api/v1/signals/{signal_id}", headers=auth_headers)
         assert response.status_code == 404
@@ -297,8 +317,8 @@ class TestSecurity:
             "username": "test",
             "role": "engineer",
             "type": "access",
-            "exp": datetime.utcnow() - timedelta(hours=1),  # Истек час назад
-            "iat": datetime.utcnow() - timedelta(hours=2)
+            "exp": datetime.now(UTC) - timedelta(hours=1),  # Истек час назад
+            "iat": datetime.now(UTC) - timedelta(hours=2)
         }
 
         expired_token = jwt.encode(expired_payload, "secret", algorithm="HS256")

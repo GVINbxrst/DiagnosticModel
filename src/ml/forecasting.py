@@ -100,7 +100,7 @@ async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: f
         raise InsufficientDataError("Недостаточно валидных RMS значений")
 
     # Агрегация по часу
-    df['ts_hour'] = pd.to_datetime(df['ts']).dt.floor('H')
+    df['ts_hour'] = pd.to_datetime(df['ts']).dt.floor('h')
     hourly = df.groupby('ts_hour')['rms_mean'].mean().reset_index().rename(columns={'ts_hour':'ds','rms_mean':'y'})
 
     series = hourly['y']
@@ -114,7 +114,7 @@ async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: f
         from prophet import Prophet  # type: ignore
         m = Prophet(daily_seasonality=True, weekly_seasonality=False, yearly_seasonality=False)
         m.fit(hourly)
-        future = m.make_future_dataframe(periods=n_steps, freq='H', include_history=False)
+        future = m.make_future_dataframe(periods=n_steps, freq='h', include_history=False)
         fc = m.predict(future)
         forecast_values = fc['yhat'].tolist()
         future_index = future['ds'].tolist()
@@ -200,7 +200,7 @@ class TimeSeriesPreprocessor:
         df: pd.DataFrame, 
         time_column: str, 
         value_column: str,
-        freq: str = '1H'
+        freq: str = '1h'
     ) -> pd.DataFrame:
         """Ресемплинг к равномерной временной сетке"""
         # Устанавливаем временной индекс
@@ -526,13 +526,13 @@ class ProphetForecaster:
             self.logger.error(f"Ошибка обучения Prophet: {e}")
             return {'success': False, 'error': str(e)}
     
-    def forecast(self, periods: int, freq: str = 'H') -> Dict:
+    def forecast(self, periods: int, freq: str = 'h') -> Dict:
         """
         Прогнозирование с помощью Prophet
         
         Args:
             periods: Количество периодов для прогноза
-            freq: Частота прогноза ('H' - часы, 'D' - дни)
+            freq: Частота прогноза ('h' - часы, 'D' - дни)
             
         Returns:
             Результаты прогноза

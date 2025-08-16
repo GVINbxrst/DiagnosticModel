@@ -11,11 +11,12 @@
 
 import asyncio
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
 import numpy as np
+import inspect
 import pandas as pd
 from scipy import signal, stats
 from scipy.interpolate import interp1d
@@ -498,7 +499,7 @@ class FeatureExtractor:
         features['summary'] = {
             'processed_phases': processed_phases,
             'total_phases': len([p for p in phases.values() if p is not None]),
-            'processing_timestamp': datetime.utcnow().isoformat()
+            'processing_timestamp': datetime.now(UTC).isoformat()
         }
 
         self.logger.info(f"Извлечены признаки из {processed_phases} фаз")
@@ -670,7 +671,10 @@ class FeatureExtractor:
             extra=features
         )
 
-        session.add(feature_record)
+        from src.utils.metrics import safe_add
+        add_res = safe_add(session, feature_record)
+        if inspect.isawaitable(add_res):
+            await add_res
         await session.flush()
 
         return feature_record.id

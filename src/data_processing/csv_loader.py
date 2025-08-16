@@ -11,10 +11,11 @@ CSV Loader для токовых сигналов асинхронных дви�
 
 import asyncio
 import csv
+import inspect
 import hashlib
 import os
 import struct
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, AsyncGenerator
 from uuid import UUID
@@ -70,7 +71,7 @@ class CSVProcessingStats:
     """
 
     def __init__(self) -> None:  # noqa: D401
-        # Счетчики строк
+        # Счётчики строк
         self.total_rows: int = 0
         self.processed_rows: int = 0
         self.skipped_rows: int = 0
@@ -78,7 +79,7 @@ class CSVProcessingStats:
         # NaN по фазам
         self.nan_values: Dict[str, int] = {"R": 0, "S": 0, "T": 0}
         # Время
-        self.start_time: datetime = datetime.now()
+        self.start_time: datetime = datetime.now(UTC)
         self.end_time: Optional[datetime] = None
         # Пачки
         self.batches_processed: int = 0
@@ -119,9 +120,9 @@ class CSVProcessingStats:
 
     def finish(self):
         """Завершить подсчет статистики"""
-        self.end_time = datetime.now()
+        self.end_time = datetime.now(UTC)
         # Определяем статус фаз: если вся фаза пустая (все NaN) -> missing
-        for p in ['R','S','T']:
+        for p in ['R', 'S', 'T']:
             if self.processed_rows > 0 and self.nan_values.get(p, 0) >= self.processed_rows:
                 self.phase_status[p] = 'missing'
             else:
@@ -132,7 +133,7 @@ class CSVProcessingStats:
         """Время обработки в секундах"""
         if self.end_time:
             return (self.end_time - self.start_time).total_seconds()
-        return (datetime.now() - self.start_time).total_seconds()
+        return (datetime.now(UTC) - self.start_time).total_seconds()
 
     @property
     def rows_per_second(self) -> float:
@@ -426,7 +427,8 @@ class CSVLoader:
                                 location='auto',
                                 specifications={'auto_created': True, 'source_file': file_path.name}
                             )
-                            session.add(equipment)
+                            from src.utils.metrics import safe_add
+                            await safe_add(session, equipment)
                             await session.flush()
                             equipment_id = equipment.id
                         else:
@@ -673,7 +675,8 @@ class CSVLoader:
             try:
                 rec_at = datetime.fromisoformat(rec_at)
             except Exception:
-                rec_at = datetime.utcnow()
+                from datetime import UTC
+                rec_at = datetime.now(UTC)
 
         # Создаем запись в базе данных
         raw_signal = RawSignal(
@@ -695,7 +698,10 @@ class CSVLoader:
             }
         )
 
-        session.add(raw_signal)
+        from src.utils.metrics import safe_add
+        add_res = safe_add(session, raw_signal)
+        if inspect.isawaitable(add_res):  # на случай если safe_add станет синхронным
+            await add_res
 
         # Флашим изменения, но не коммитим (это делается выше)
         await session.flush()

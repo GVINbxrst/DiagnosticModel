@@ -78,7 +78,8 @@ async def app(session):
 @pytest.mark.asyncio
 async def test_upload_success_full_pipeline(app, session: AsyncSession):
     csv_content = 'current_R,current_S,current_T\n1,2,3\n4,5,6\n7,8,9\n'
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    from httpx import ASGITransport
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         files = {"file": ("test.csv", csv_content, "text/csv")}
         resp = await ac.post("/upload", files=files)
     assert resp.status_code == 200, resp.text
@@ -112,7 +113,8 @@ async def test_upload_success_full_pipeline(app, session: AsyncSession):
 @pytest.mark.asyncio
 async def test_upload_bad_header(app):
     csv_content = 'bad,header,here\n1,2,3\n'
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    from httpx import ASGITransport
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         files = {"file": ("bad.csv", csv_content, "text/csv")}
         resp = await ac.post("/upload", files=files)
     assert resp.status_code == 422

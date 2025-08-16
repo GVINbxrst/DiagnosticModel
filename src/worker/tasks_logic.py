@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, Any
 from uuid import UUID
 
@@ -60,10 +60,10 @@ async def compress_and_store_results(data: Any) -> bytes:
 @_observe_latency('worker_task_duration_seconds', labels={'task_name':'process_raw'})
 @celery_app.task(bind=True, base=DatabaseTask, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60}, retry_backoff=True, retry_jitter=True)
 def process_raw(self, raw_id: str) -> Dict:
-    task_start = datetime.utcnow()
+    task_start = datetime.now(UTC)
     try:
         result = asyncio.run(_process_raw_async(raw_id))
-        result['processing_time_seconds'] = (datetime.utcnow() - task_start).total_seconds()
+        result['processing_time_seconds'] = (datetime.now(UTC) - task_start).total_seconds()
         return result
     except Exception as exc:
         asyncio.run(_update_signal_status(raw_id, ProcessingStatus.FAILED, str(exc)))

@@ -307,6 +307,10 @@ class Prediction(Base, TimestampMixin):
 
     # Результаты предсказания
     probability: Mapped[float] = mapped_column(Numeric(precision=5, scale=4), nullable=False)
+    # Флаг обнаружения аномалии (для запросов аномалий)
+    anomaly_detected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    # Уверенность (дублирующая метрика для удобства фильтрации)
+    confidence: Mapped[float] = mapped_column(Numeric(precision=5, scale=4), nullable=False, default=0.0)
     predicted_severity: Mapped[Optional[DefectSeverity]] = mapped_column(
         Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c])
     )

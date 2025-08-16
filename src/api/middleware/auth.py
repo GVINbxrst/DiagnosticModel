@@ -3,7 +3,7 @@ JWT авторизация и middleware для FastAPI
 """
 
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -38,30 +38,26 @@ class JWTHandler:
 
     def create_access_token(self, user_id: str, username: str, role: str) -> str:
         """Создание access токена"""
-        expire = datetime.utcnow() + timedelta(minutes=self.access_token_expire)
-
+        expire = datetime.now(UTC) + timedelta(minutes=self.access_token_expire)
         payload = {
             "sub": user_id,
             "username": username,
             "role": role,
             "type": "access",
             "exp": expire,
-            "iat": datetime.utcnow()
+            "iat": datetime.now(UTC)
         }
-
         return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
 
     def create_refresh_token(self, user_id: str) -> str:
         """Создание refresh токена"""
-        expire = datetime.utcnow() + timedelta(days=self.refresh_token_expire)
-
+        expire = datetime.now(UTC) + timedelta(days=self.refresh_token_expire)
         payload = {
             "sub": user_id,
             "type": "refresh",
             "exp": expire,
-            "iat": datetime.utcnow()
+            "iat": datetime.now(UTC)
         }
-
         return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
 
     def decode_token(self, token: str) -> Dict[str, Any]:
@@ -206,7 +202,7 @@ class RoleChecker:
                     detail=f"Недостаточно прав. Требуются роли: {', '.join(allowed_names)}"
                 )
             if not isinstance(current_user, UserInfo):
-                from datetime import datetime
+                from datetime import datetime, UTC
                 from uuid import uuid4
                 data = {
                     'id': getattr(current_user, 'id', uuid4()),
@@ -215,7 +211,7 @@ class RoleChecker:
                     'full_name': getattr(current_user, 'full_name', None),
                     'role': getattr(getattr(current_user, 'role', 'viewer'), 'value', getattr(current_user, 'role', 'viewer')),
                     'is_active': getattr(current_user, 'is_active', True),
-                    'created_at': getattr(current_user, 'created_at', datetime.utcnow()),
+                    'created_at': getattr(current_user, 'created_at', datetime.now(UTC)),
                 }
                 current_user = UserInfo(**data)
             return current_user

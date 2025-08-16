@@ -7,7 +7,7 @@
 import asyncio
 import pytest
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from uuid import uuid4
 
@@ -51,8 +51,8 @@ def mock_feature():
     """Создает мок признаков"""
     feature = Mock(spec=Feature)
     feature.id = uuid4()
-    feature.window_start = datetime.utcnow()
-    feature.window_end = datetime.utcnow() + timedelta(seconds=1)
+    feature.window_start = datetime.now(UTC)
+    feature.window_end = datetime.now(UTC) + timedelta(seconds=1)
 
     # Статистические признаки
     feature.rms_a = 5.2
@@ -120,7 +120,7 @@ class TestCoreWorkerTasks:
         test_data = {
             'status': 'success',
             'results': [1, 2, 3],
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': datetime.now(UTC).isoformat()
         }
 
         compressed = await compress_and_store_results(test_data)
@@ -170,7 +170,7 @@ class TestCoreWorkerTasks:
                     self.phase_b = None
                     self.phase_c = None
                     self.sample_rate_hz = 25600
-                    self.recorded_at = datetime.utcnow()
+                    self.recorded_at = datetime.now(UTC)
 
             completed = DummySignal(status=ProcessingStatus.COMPLETED)
 

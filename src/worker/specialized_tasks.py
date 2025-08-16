@@ -1,6 +1,7 @@
 """Специализированные задачи (перенос для устранения циклических импортов)."""
 import asyncio
-from datetime import datetime, timedelta
+import inspect
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import UUID
@@ -85,8 +86,18 @@ async def _get_or_create_equipment_from_filename(filename: str) -> str:
         equipment = result.scalar_one_or_none()
         if equipment:
             return str(equipment.id)
-        new_equipment = Equipment(name=equipment_name,equipment_type='motor',model=f"Auto-detected from {filename}",location='Unknown',is_active=True,created_at=datetime.utcnow())
-        session.add(new_equipment)
+        new_equipment = Equipment(
+            name=equipment_name,
+            equipment_type='motor',
+            model=f"Auto-detected from {filename}",
+            location='Unknown',
+            is_active=True,
+            created_at=datetime.now(UTC)
+        )
+        from src.utils.metrics import safe_add
+        add_res = safe_add(session, new_equipment)
+        if inspect.isawaitable(add_res):
+            await add_res
         await session.commit()
         await session.refresh(new_equipment)
         return str(new_equipment.id)
@@ -138,15 +149,59 @@ def health_check_system(self) -> Dict:
 
 async def _health_check_system_async() -> Dict:
     async with get_async_session() as session:
-        raw_stats = await session.execute(select(RawSignal.processing_status, func.count(RawSignal.id).label('count')).group_by(RawSignal.processing_status))
+        raw_stats = await session.execute(
+            select(RawSignal.processing_status, func.count(RawSignal.id).label('count')).group_by(RawSignal.processing_status)
+        )
         raw_signal_stats = {row.processing_status.value: row.count for row in raw_stats}
         total_features = (await session.execute(select(func.count(Feature.id)))).scalar()
-        yesterday = datetime.utcnow() - timedelta(days=1)
-        recent_predictions_count = (await session.execute(select(func.count(Prediction.id)).where(Prediction.created_at>=yesterday))).scalar()
-        recent_anomalies_count = (await session.execute(select(func.count(Prediction.id)).where(Prediction.created_at>=yesterday, Prediction.anomaly_detected==True))).scalar()  # noqa: E712
-        active_equipment_count = (await session.execute(select(func.count(Equipment.id)).where(Equipment.is_active==True))).scalar()  # noqa: E712
-        equipment_with_anomalies_count = (await session.execute(select(func.count(func.distinct(Prediction.equipment_id))).where(Prediction.created_at>=yesterday, Prediction.anomaly_detected==True))).scalar()  # noqa: E712
-        return {'status':'healthy','timestamp':datetime.utcnow().isoformat(),'statistics':{'raw_signals':{'by_status':raw_signal_stats,'total':sum(raw_signal_stats.values())},'features':{'total':total_features},'predictions_24h':{'total':recent_predictions_count,'anomalies':recent_anomalies_count,'anomaly_rate':recent_anomalies_count/max(1,recent_predictions_count)},'equipment':{'active':active_equipment_count,'with_recent_anomalies':equipment_with_anomalies_count,'anomaly_equipment_rate':equipment_with_anomalies_count/max(1,active_equipment_count)}},'alerts':_generate_system_alerts(raw_signal_stats,recent_anomalies_count,equipment_with_anomalies_count,active_equipment_count)}
+        yesterday = datetime.now(UTC) - timedelta(days=1)
+        recent_predictions_count = (await session.execute(
+            select(func.count(Prediction.id)).where(Prediction.created_at >= yesterday)
+        )).scalar()
+        recent_anomalies_count = (await session.execute(
+            select(func.count(Prediction.id)).where(
+                Prediction.created_at >= yesterday,
+                Prediction.anomaly_detected == True  # noqa: E712
+            )
+        )).scalar()
+        active_equipment_count = (await session.execute(
+            select(func.count(Equipment.id)).where(Equipment.is_active == True)  # noqa: E712
+        )).scalar()
+        equipment_with_anomalies_count = (await session.execute(
+            select(func.count(func.distinct(Prediction.equipment_id))).where(
+                Prediction.created_at >= yesterday,
+                Prediction.anomaly_detected == True  # noqa: E712
+            )
+        )).scalar()
+    return {
+        'status': 'healthy',
+        'timestamp': datetime.now(UTC).isoformat(),
+        'statistics': {
+            'raw_signals': {
+                'by_status': raw_signal_stats,
+                'total': sum(raw_signal_stats.values())
+            },
+            'features': {
+                'total': total_features
+            },
+            'predictions_24h': {
+                'total': recent_predictions_count,
+                'anomalies': recent_anomalies_count,
+                'anomaly_rate': recent_anomalies_count / max(1, recent_predictions_count)
+            },
+            'equipment': {
+                'active': active_equipment_count,
+                'with_recent_anomalies': equipment_with_anomalies_count,
+                'anomaly_equipment_rate': equipment_with_anomalies_count / max(1, active_equipment_count)
+            }
+        },
+        'alerts': _generate_system_alerts(
+            raw_signal_stats,
+            recent_anomalies_count,
+            equipment_with_anomalies_count,
+            active_equipment_count
+        )
+    }
 
 def _generate_system_alerts(raw_signal_stats: Dict, recent_anomalies: int, equipment_with_anomalies: int, active_equipment: int) -> List[Dict]:
     alerts=[]
@@ -173,27 +228,65 @@ def daily_equipment_report(self, equipment_id: Optional[str] = None) -> Dict:
 
 async def _daily_equipment_report_async(equipment_id: Optional[str]) -> Dict:
     async with get_async_session() as session:
-        yesterday = datetime.utcnow() - timedelta(days=1)
-        equipment_filter=[]
+        yesterday = datetime.now(UTC) - timedelta(days=1)
+        equipment_filter = []
         if equipment_id:
-            equipment_filter.append(Equipment.id==UUID(equipment_id))
-        equipment_result = await session.execute(select(Equipment).where(*equipment_filter, Equipment.is_active==True))  # noqa: E712
+            equipment_filter.append(Equipment.id == UUID(equipment_id))
+        equipment_result = await session.execute(
+            select(Equipment).where(*equipment_filter, Equipment.is_active == True)  # noqa: E712
+        )
         equipment_list = equipment_result.scalars().all()
-        reports=[]
+        reports = []
         for eq in equipment_list:
-            anomalies_count = (await session.execute(select(func.count(Prediction.id)).where(Prediction.equipment_id==eq.id, Prediction.created_at>=yesterday, Prediction.anomaly_detected==True))).scalar()  # noqa: E712
-            last_forecast_result = await session.execute(select(Prediction).where(Prediction.equipment_id==eq.id, Prediction.model_name=='rms_trend_forecasting').order_by(Prediction.created_at.desc()).limit(1))
+            anomalies_count = (await session.execute(
+                select(func.count(Prediction.id)).where(
+                    Prediction.equipment_id == eq.id,
+                    Prediction.created_at >= yesterday,
+                    Prediction.anomaly_detected == True  # noqa: E712
+                )
+            )).scalar()
+            last_forecast_result = await session.execute(
+                select(Prediction).where(
+                    Prediction.equipment_id == eq.id,
+                    Prediction.model_name == 'rms_trend_forecasting'
+                ).order_by(Prediction.created_at.desc()).limit(1)
+            )
             last_forecast = last_forecast_result.scalar_one_or_none()
-            status='normal'
-            if anomalies_count>10: status='critical'
-            elif anomalies_count>5: status='warning'
-            elif anomalies_count>0: status='attention'
-            reports.append({'equipment_id':str(eq.id),'equipment_name':eq.name,'status':status,'anomalies_24h':anomalies_count,'last_forecast':{'timestamp': last_forecast.created_at.isoformat() if last_forecast else None,'max_anomaly_probability': last_forecast.confidence if last_forecast else None,'recommendation': last_forecast.prediction_data.get('forecast_summary', {}).get('recommendation') if last_forecast and last_forecast.prediction_data else None}})
-        total=len(reports)
-        critical=len([r for r in reports if r['status']=='critical'])
-        warning=len([r for r in reports if r['status']=='warning'])
-        total_anomalies=sum(r['anomalies_24h'] for r in reports)
-        return {'report_date': yesterday.date().isoformat(),'generated_at': datetime.utcnow().isoformat(),'summary': {'total_equipment': total,'critical_equipment': critical,'warning_equipment': warning,'normal_equipment': total-critical-warning,'total_anomalies_24h': total_anomalies},'equipment_details': reports,'recommendations': _generate_daily_recommendations(reports)}
+            status = 'normal'
+            if anomalies_count > 10:
+                status = 'critical'
+            elif anomalies_count > 5:
+                status = 'warning'
+            elif anomalies_count > 0:
+                status = 'attention'
+            reports.append({
+                'equipment_id': str(eq.id),
+                'equipment_name': eq.name,
+                'status': status,
+                'anomalies_24h': anomalies_count,
+                'last_forecast': {
+                    'timestamp': last_forecast.created_at.isoformat() if last_forecast else None,
+                    'max_anomaly_probability': last_forecast.confidence if last_forecast else None,
+                    'recommendation': last_forecast.prediction_data.get('forecast_summary', {}).get('recommendation') if last_forecast and last_forecast.prediction_data else None
+                }
+            })
+        total = len(reports)
+        critical = len([r for r in reports if r['status'] == 'critical'])
+        warning = len([r for r in reports if r['status'] == 'warning'])
+        total_anomalies = sum(r['anomalies_24h'] for r in reports)
+    return {
+        'report_date': yesterday.date().isoformat(),
+        'generated_at': datetime.now(UTC).isoformat(),
+        'summary': {
+            'total_equipment': total,
+            'critical_equipment': critical,
+            'warning_equipment': warning,
+            'normal_equipment': total - critical - warning,
+            'total_anomalies_24h': total_anomalies
+        },
+        'equipment_details': reports,
+        'recommendations': _generate_daily_recommendations(reports)
+    }
 
 def _generate_daily_recommendations(equipment_reports: List[Dict]) -> List[str]:
     rec=[]

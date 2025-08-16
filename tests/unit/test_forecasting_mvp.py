@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from uuid import uuid4
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from sqlalchemy import text
 
 from src.ml.forecasting import forecast_rms, InsufficientDataError
@@ -27,7 +27,7 @@ async def test_forecast_rms_mvp():
             'name': 'Test Motor',
             'type': 'induction_motor',
             'status': 'inactive',
-            'ts': datetime.utcnow()
+            'ts': datetime.now(UTC)
         })
         raw_signal_id = str(uuid4())
         await conn.execute(text(
@@ -36,11 +36,13 @@ async def test_forecast_rms_mvp():
         ), {
             'id': raw_signal_id,           # строковое представление UUID
             'eq': str(equipment_id),       # приведение для sqlite
-            'ts': datetime.utcnow(),
+            'ts': datetime.now(UTC),
             'sr': 25600,
             'cnt': 1000
         })
-        base_ts = datetime.utcnow() - timedelta(hours=150)
+    # Отдельный транзакционный блок для вставки features
+    base_ts = datetime.now(UTC) - timedelta(hours=150)
+    async with engine.begin() as conn:
         for i in range(150):
             ts = base_ts + timedelta(hours=i)
             rms = 10 + 0.01 * i + np.random.normal(0, 0.2)
@@ -68,7 +70,7 @@ async def test_forecast_rms_mvp():
                 'rms': float(rms),
                 'rmin': float(rms) - 0.5,
                 'rmax': float(rms) + 0.5,
-                'ts': datetime.utcnow()
+                'ts': datetime.now(UTC)
             })
     result = await forecast_rms(equipment_id, n_steps=12)
     assert 'forecast' in result and len(result['forecast']) == 12

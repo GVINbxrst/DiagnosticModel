@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Optional, Any
 from uuid import UUID
 
@@ -74,10 +74,10 @@ async def compress_and_store_results(data: Any) -> bytes:
 @_observe_latency('worker_task_duration_seconds', labels={'task_name': 'process_raw'})
 def process_raw(self, raw_id: str) -> Dict:
     """Celery оболочка для асинхронной обработки сырого сигнала."""
-    started = datetime.utcnow()
+    started = datetime.now(UTC)
     try:
         result = asyncio.run(_process_raw_async(raw_id))
-        result['processing_time_seconds'] = (datetime.utcnow() - started).total_seconds()
+        result['processing_time_seconds'] = (datetime.now(UTC) - started).total_seconds()
         return result
     except Exception as exc:  # pragma: no cover - ретраи
         try:
@@ -150,8 +150,8 @@ async def _process_raw_async(raw_id: str) -> Dict:
                 from datetime import timedelta, datetime as _dt
                 feats = extractor.extract_features_from_phases(
                     phase_data.get('phase_a'), phase_data.get('phase_b'), phase_data.get('phase_c'),
-                    getattr(raw_signal, 'recorded_at', _dt.utcnow()),
-                    getattr(raw_signal, 'recorded_at', _dt.utcnow()) + timedelta(milliseconds=1000)
+                    getattr(raw_signal, 'recorded_at', datetime.now(UTC)),
+                    getattr(raw_signal, 'recorded_at', datetime.now(UTC)) + timedelta(milliseconds=1000)
                 )
                 save_fn = getattr(extractor, '_save_features_to_db', None)
                 if save_fn:
@@ -212,10 +212,10 @@ async def _update_signal_status(raw_id: str, status: ProcessingStatus, error: Op
 )
 @_observe_latency('worker_task_duration_seconds', labels={'task_name': 'detect_anomalies'})
 def detect_anomalies(self, feature_id: str) -> Dict:
-    started = datetime.utcnow()
+    started = datetime.now(UTC)
     try:
         result = asyncio.run(_detect_anomalies_async(feature_id))
-        result['processing_time_seconds'] = (datetime.utcnow() - started).total_seconds()
+        result['processing_time_seconds'] = (datetime.now(UTC) - started).total_seconds()
         return result
     except Exception as exc:  # pragma: no cover
         if self.request.retries < self.max_retries:
@@ -274,12 +274,8 @@ async def _detect_anomalies_async(feature_id: str) -> Dict:
                 'anomaly_detected': anomaly
             }
         )
-        add_result = session.add(prediction)
-        if asyncio.iscoroutine(add_result):  # на случай AsyncMock возвращающего корутину
-            try:
-                await add_result
-            except Exception:
-                pass
+        from src.utils.metrics import safe_add
+        await safe_add(session, prediction)
         await session.commit()
         if anomaly and conf > 0.7:
             eq_q = select(RawSignal.equipment_id).join(Feature).where(Feature.id == UUID(feature_id))
@@ -334,10 +330,10 @@ async def load_latest_models_async():
 )
 @_observe_latency('worker_task_duration_seconds', labels={'task_name': 'forecast_trend'})
 def forecast_trend(self, equipment_id: str) -> Dict:  # noqa: D401
-    started = datetime.utcnow()
+    started = datetime.now(UTC)
     try:
         result = asyncio.run(_forecast_trend_async(equipment_id))
-        result['processing_time_seconds'] = (datetime.utcnow() - started).total_seconds()
+        result['processing_time_seconds'] = (datetime.now(UTC) - started).total_seconds()
         return result
     except Exception as exc:  # pragma: no cover
         if self.request.retries < self.max_retries:
@@ -372,13 +368,8 @@ async def _forecast_trend_async(equipment_id: str) -> Dict:
             model_version='1.0.0',
             prediction_details=fc
         )
-        try:
-            session.add(prediction)  # может быть AsyncMock
-        except Exception:
-            try:
-                await session.add(prediction)  # type: ignore
-            except Exception:
-                pass
+        from src.utils.metrics import safe_add
+        await safe_add(session, prediction)  # может быть AsyncMock
         try:
             await session.commit()
         except Exception:
@@ -389,7 +380,7 @@ async def _forecast_trend_async(equipment_id: str) -> Dict:
 @celery_app.task(bind=True, base=DatabaseTask)
 @_observe_latency('worker_task_duration_seconds', labels={'task_name': 'cleanup_old_data'})
 def cleanup_old_data(self, days: int = 30) -> Dict:
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     return {'status': 'success', 'cutoff': cutoff.isoformat()}
 
 
@@ -500,7 +491,7 @@ def cleanup_old_data(self, days_to_keep: int = 30) -> Dict:
 async def _cleanup_old_data_async(days_to_keep: int) -> Dict:
     """Асинхронная очистка старых данных"""
 
-    cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+    cutoff_date = datetime.now(UTC) - timedelta(days=days_to_keep)
     deleted_counts = {}
 
     async with _resolve_session_factory()() as session:
@@ -577,7 +568,7 @@ async def _retrain_models_async() -> Dict:
     return {
         'status': 'success',
         'training_results': training_results,
-        'retrain_timestamp': datetime.utcnow().isoformat()
+    'retrain_timestamp': datetime.now(UTC).isoformat()
     }
 
 

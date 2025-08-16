@@ -10,7 +10,7 @@
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Optional, Dict, Any, List
 from uuid import UUID, uuid4
 from enum import Enum
@@ -421,9 +421,7 @@ class EnhancedJWTHandler:
     def _create_access_token(self, user: User, session_id: str) -> str:
         """Создание access токена"""
         import jwt
-
-        expire = datetime.utcnow() + timedelta(minutes=self.access_token_expire)
-
+        expire = datetime.now(UTC) + timedelta(minutes=self.access_token_expire)
         role_value = user.role.value if hasattr(user.role, 'value') else str(user.role)
         payload = {
             "sub": str(user.id),
@@ -432,27 +430,23 @@ class EnhancedJWTHandler:
             "session_id": session_id,
             "type": "access",
             "exp": expire,
-            "iat": datetime.utcnow(),
+            "iat": datetime.now(UTC),
             "jti": str(uuid4())  # JWT ID для отслеживания
         }
-
         return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
 
     def _create_refresh_token(self, user: User, session_id: str) -> str:
         """Создание refresh токена"""
         import jwt
-
-        expire = datetime.utcnow() + timedelta(days=self.refresh_token_expire)
-
+        expire = datetime.now(UTC) + timedelta(days=self.refresh_token_expire)
         payload = {
             "sub": str(user.id),
             "session_id": session_id,
             "type": "refresh",
             "exp": expire,
-            "iat": datetime.utcnow(),
+            "iat": datetime.now(UTC),
             "jti": str(uuid4())
         }
-
         return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
 
     def _decode_token(self, token: str) -> Dict[str, Any]:
@@ -496,7 +490,7 @@ class EnhancedJWTHandler:
 
             client_ip = self.audit_logger._get_client_ip(request)
             user_agent = request.headers.get("user-agent", "")
-            expires_at = datetime.utcnow() + timedelta(days=self.refresh_token_expire)
+            expires_at = datetime.now(UTC) + timedelta(days=self.refresh_token_expire)
 
             await session.execute(insert_query, {
                 'user_id': str(user.id),

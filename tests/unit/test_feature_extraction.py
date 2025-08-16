@@ -4,7 +4,7 @@
 MAX_NAN_RATIO=0.2. Покрытие: предобработка, статистика, FFT, агрегатор, БД save, интеграция.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from uuid import uuid4
 from unittest.mock import AsyncMock
 
@@ -148,7 +148,7 @@ class TestFeatureExtractor:
     def test_single_phase(self, extractor):
         t = np.linspace(0, 1, 1500)
         phase_a = np.sin(2 * np.pi * 50 * t) + 0.05 * np.random.normal(0, 1, len(t))
-        ws = datetime.utcnow(); we = ws + timedelta(seconds=1)
+        ws = datetime.now(UTC); we = ws + timedelta(seconds=1)
         f = extractor.extract_features_from_phases(phase_a=phase_a, window_start=ws, window_end=we)
         assert f['phases']['a'] and f['phases']['b'] is None and f['phases']['c'] is None
         assert 'statistical' in f['phases']['a'] and 'frequency' in f['phases']['a']
@@ -211,7 +211,7 @@ class TestFeatureExtractor:
                 'c': None
             }
         }
-        rid = uuid4(); ws = datetime.utcnow(); we = ws + timedelta(seconds=1)
+        rid = uuid4(); ws = datetime.now(UTC); we = ws + timedelta(seconds=1)
         _ = await extractor._save_features_to_db(mock_session, rid, features, ws, we)
         assert mock_session.add.called and mock_session.flush.await_count == 1
 

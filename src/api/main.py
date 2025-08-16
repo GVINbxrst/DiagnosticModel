@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
 from src.database.connection import get_async_session  # re-export for tests patching
 from src.api.middleware.metrics import PrometheusMiddleware
 from src.api.routes import monitoring, signals, upload, auth, anomalies, admin_security
@@ -24,7 +25,21 @@ from src.utils.metrics import metrics_collector
 setup_logging()
 logger = get_logger(__name__)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # pragma: no cover - оборачиваем стартап/шутдаун
+    logger.info("🚀 Запуск DiagMod API")
+    try:
+        metrics_collector.update_system_metrics()
+        logger.info("📊 Система метрик инициализирована")
+    except Exception:  # не валим приложение из-за метрик
+        logger.warning("Не удалось инициализировать метрики при старте", exc_info=True)
+    yield
+    try:
+        logger.info("🛑 Завершение работы DiagMod API")
+    except Exception:
+        pass
+
+app = FastAPI(lifespan=lifespan)
 
 # Добавление middleware для метрик
 app.add_middleware(PrometheusMiddleware)
@@ -65,21 +80,4 @@ app.include_router(auth.router, prefix="/api/v1", tags=["auth"])  # версия
 app.include_router(auth.router, prefix="/auth", tags=["auth"])    # legacy совместимость для тестов
 app.include_router(admin_security.router, prefix="/admin/security", tags=["admin-security"])  # административные security эндпоинты
 
-@app.on_event("startup")
-async def startup_event():
-    """События при запуске приложения"""
-    logger.info("🚀 Запуск DiagMod API")
-
-    # Инициализация метрик
-    metrics_collector.update_system_metrics()
-    logger.info("📊 Система метрик инициализирована")
-
-    # Здесь можно инициализировать дополнительные ресурсы при старте
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """События при завершении работы приложения"""
-    logger.info("🛑 Завершение работы DiagMod API")
-
-    # Здесь можно освободить ресурсы при завершении
+## Удалены on_event startup/shutdown (заменены lifespan)

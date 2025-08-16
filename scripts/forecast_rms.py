@@ -15,7 +15,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
@@ -89,7 +89,7 @@ async def forecast_all_equipment(
     logger.info(f"Найдено {len(equipment_ids)} единиц оборудования")
 
     all_results = {
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(UTC).isoformat(),
         'total_equipment': len(equipment_ids),
         'forecast_steps': forecast_steps,
         'phases': phases,

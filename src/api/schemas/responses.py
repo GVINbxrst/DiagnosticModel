@@ -4,7 +4,7 @@
 
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, UTC
 
 
 class HealthResponse(BaseModel):
@@ -20,7 +20,7 @@ class SuccessResponse(BaseModel):
     """Базовая схема успешного ответа"""
     success: bool = True
     message: str
-    timestamp: float = Field(default_factory=lambda: datetime.utcnow().timestamp())
+    timestamp: float = Field(default_factory=lambda: datetime.now(UTC).timestamp())
 
 
 class ErrorResponse(BaseModel):
@@ -29,4 +29,4 @@ class ErrorResponse(BaseModel):
     status_code: int
     message: str
     detail: Optional[str] = None
-    timestamp: float = Field(default_factory=lambda: datetime.utcnow().timestamp())
+    timestamp: float = Field(default_factory=lambda: datetime.now(UTC).timestamp())

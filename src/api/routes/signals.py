@@ -29,224 +29,60 @@ logger = get_logger(__name__)
 @observe_latency('api_request_duration_seconds', labels={'method':'GET','endpoint':'/signals/{id}'})
 async def get_signal_data(
     raw_id: UUID,
+    request: Request,
     downsample_factor: Optional[int] = Query(None, ge=1, le=100, description="Фактор прореживания данных"),
     start_sample: Optional[int] = Query(None, ge=0, description="Начальный отсчет"),
     end_sample: Optional[int] = Query(None, ge=0, description="Конечный отсчет"),
     current_user: UserInfo = Depends(require_any_role),
-    # Возвращаем зависимость на get_async_session чтобы тесты могли мокаить её.
-    # Тесты переопределяют get_async_session генератором yield AsyncMock.
-    session: AsyncSession = Depends(get_async_session)
+    session: AsyncSession = Depends(db_session)
 ):
-    """
-    Получение данных сигнала по фазам для визуализации
-
-    Возвращает:
-    - Сырые данные сигналов по всем доступным фазам
-    - Метаданные сигнала (частота дискретизации, время записи)
-    - Базовую статистику по каждой фазе
-    - Возможность прореживания данных для быстрой визуализации
-    """
-
-    # Поддержка случая когда dependency переопределён на async generator и FastAPI передаёт контекстный менеджер
-    if (
-        hasattr(session, '__aenter__')
-        and not isinstance(session, AsyncSession)
-        and not getattr(session, '__dependency_unwrapped__', False)
-    ):  # _AsyncGeneratorContextManager or AsyncMock
-        async with session as real_session:  # type: ignore
-            # Помечаем чтобы избежать повторной рекурсии с AsyncMock
-            try:
-                setattr(real_session, '__dependency_unwrapped__', True)
-            except Exception:
-                pass
-            return await get_signal_data(
-                raw_id=raw_id,
-                downsample_factor=downsample_factor,
-                start_sample=start_sample,
-                end_sample=end_sample,
-                current_user=current_user,
-                session=real_session  # type: ignore
-            )
-
-    start_time = time.time()
-
-    # Получаем сигнал из БД
-    signal_query = select(RawSignal).where(RawSignal.id == raw_id)
-    signal_result = await session.execute(signal_query)
-    raw_signal = signal_result.scalar_one_or_none()
-    # Поддержка случая когда мок возвращает coroutine
-    import inspect
-    if inspect.iscoroutine(raw_signal):
-        try:
-            raw_signal = await raw_signal  # type: ignore
-        except Exception:
-            raw_signal = None
-    # Нормализация мок-объекта (AsyncMock/MagicMock) для тестов
-    if raw_signal is not None:
-        try:
-            from unittest.mock import AsyncMock, MagicMock
-            # Преобразуем id / equipment_id
-            def _coerce_uuid(val):
-                from uuid import UUID as _UUID
-                if val is None:
-                    return None
-                if isinstance(val, _UUID):
-                    return val
-                if isinstance(val, (str, bytes)):
-                    try:
-                        return _UUID(str(val))
-                    except Exception:
-                        return None
-                # Mock / MagicMock -> попытка взять return_value или str
-                if isinstance(val, (AsyncMock, MagicMock)):
-                    rv = getattr(val, 'return_value', None)
-                    if isinstance(rv, _UUID):
-                        return rv
-                    try:
-                        return _UUID(str(rv or val))
-                    except Exception:
-                        return None
-                try:
-                    return _UUID(str(val))
-                except Exception:
-                    return None
-            # Прямое присваивание чтобы Pydantic получил реальные значения
-            rid = getattr(raw_signal, 'id', None)
-            eid = getattr(raw_signal, 'equipment_id', None)
-            coerced_id = _coerce_uuid(rid)
-            coerced_eid = _coerce_uuid(eid)
-            if coerced_id is not None:
-                setattr(raw_signal, 'id', coerced_id)
-            if coerced_eid is not None:
-                setattr(raw_signal, 'equipment_id', coerced_eid)
-            # metadata
-            md = getattr(raw_signal, 'metadata', {})
-            if isinstance(md, (AsyncMock, MagicMock)):
-                try:
-                    md = md.return_value if isinstance(md.return_value, dict) else {}
-                except Exception:
-                    md = {}
-            if not isinstance(md, dict):
-                md = {}
-            setattr(raw_signal, 'metadata', md)
-            # processing_status
-            ps = getattr(raw_signal, 'processing_status', None)
-            if ps is not None and not isinstance(ps, ProcessingStatus):
-                try:
-                    ps = ProcessingStatus(str(getattr(ps, 'value', ps)))
-                except Exception:
-                    ps = ProcessingStatus.COMPLETED
-                setattr(raw_signal, 'processing_status', ps)
-        except Exception:  # pragma: no cover - защитный блок
-            pass
-
+    """Получение данных одного сигнала. Простая версия: берём AsyncSession напрямую через db_session."""
+    result = await session.execute(select(RawSignal).where(RawSignal.id == raw_id))
+    raw_signal = result.scalar_one_or_none()
     if not raw_signal:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Сигнал с ID {raw_id} не найден"
-        )
+        raise HTTPException(status_code=404, detail=f"Сигнал с ID {raw_id} не найден")
 
-    try:
-        # Распаковываем данные фаз
-        phases = []
+    phases: List[PhaseData] = []
+    from src.utils.serialization import load_float32_array
+    for phase_name, phase_data in [('A', raw_signal.phase_a), ('B', raw_signal.phase_b), ('C', raw_signal.phase_c)]:
+        if phase_data is not None and isinstance(phase_data, (bytes, bytearray)):
+            arr_loaded = load_float32_array(phase_data)
+            arr = arr_loaded if arr_loaded is not None else np.array([], dtype=np.float32)
+            values = arr
+            if start_sample is not None or end_sample is not None:
+                s = start_sample or 0
+                e = end_sample or len(values)
+                values = values[s:e]
+            if downsample_factor and downsample_factor > 1:
+                values = values[::downsample_factor]
+            phases.append(PhaseData(
+                phase_name=phase_name,
+                values=values.tolist(),
+                has_data=len(values) > 0,
+                samples_count=len(values),
+                statistics=None
+            ))
+        else:
+            phases.append(PhaseData(
+                phase_name=phase_name,
+                values=[],
+                has_data=False,
+                samples_count=0,
+                statistics=None
+            ))
 
-        from src.utils.serialization import load_float32_array
-        for phase_name, phase_data in [('a', raw_signal.phase_a), ('b', raw_signal.phase_b), ('c', raw_signal.phase_c)]:
-            if phase_data is not None and isinstance(phase_data, (bytes, bytearray)):
-                values_arr = load_float32_array(phase_data)
-                if values_arr is None:
-                    phase_info = PhaseData(
-                        phase_name=phase_name.upper(),
-                        values=[], has_data=False, samples_count=0, statistics=None
-                    )
-                    phases.append(phase_info)
-                    continue
-                values = values_arr
-
-                # Применяем фильтрацию по диапазону
-                if start_sample is not None or end_sample is not None:
-                    start_idx = start_sample or 0
-                    end_idx = end_sample or len(values)
-                    values = values[start_idx:end_idx]
-
-                # Применяем прореживание если указано
-                if downsample_factor and downsample_factor > 1:
-                    values = values[::downsample_factor]
-
-                # Рассчитываем статистику
-                statistics = {
-                    'mean': float(np.mean(values)),
-                    'std': float(np.std(values)),
-                    'min': float(np.min(values)),
-                    'max': float(np.max(values)),
-                    'rms': float(np.sqrt(np.mean(values**2))),
-                    'peak_to_peak': float(np.ptp(values))
-                }
-
-                phase_info = PhaseData(
-                    phase_name=phase_name.upper(),
-                    values=values.tolist(),
-                    has_data=True,
-                    samples_count=len(values),
-                    statistics=statistics
-                )
-            else:  # Нет данных или неподдерживаемый тип (например AsyncMock из патча)
-                # Фаза отсутствует
-                phase_info = PhaseData(
-                    phase_name=phase_name.upper(),
-                    values=[],
-                    has_data=False,
-                    samples_count=0,
-                    statistics=None
-                )
-
-            phases.append(phase_info)
-
-        # Подготавливаем метаданные
-        metadata = raw_signal.metadata or {}
-        metadata.update({
-            'downsample_factor': downsample_factor,
-            'start_sample': start_sample,
-            'end_sample': end_sample,
-            'file_hash': raw_signal.file_hash
-        })
-
-        processing_time = time.time() - start_time
-
-        # Обновляем метрики
-        utils_metrics.observe_histogram(
-            'api_request_duration_seconds',
-            processing_time,
-            {'method': 'GET', 'endpoint': '/signals/{id}'}
-        )
-
-        logger.info(
-            f"Сигнал {raw_id} отдан пользователю {current_user.username} за {processing_time:.3f}s",
-            extra={
-                'signal_id': str(raw_id),
-                'equipment_id': str(raw_signal.equipment_id),
-                'phases_count': sum(1 for p in phases if p.has_data),
-                'downsample_factor': downsample_factor
-            }
-        )
-
-        return SignalResponse(
-            raw_signal_id=raw_signal.id,
-            equipment_id=raw_signal.equipment_id,
-            recorded_at=raw_signal.recorded_at,
-            sample_rate=raw_signal.sample_rate_hz,
-            total_samples=raw_signal.samples_count,
-            phases=phases,
-            metadata=metadata,
-            processing_status=raw_signal.processing_status
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка обработки сигнала {raw_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Ошибка обработки данных сигнала"
-        )
+    # В модели поле называется meta (JSONB). Ранее использовалось raw_signal.metadata что давало MetaData().
+    metadata = (raw_signal.meta or {})
+    return SignalResponse(
+        raw_signal_id=raw_signal.id,
+        equipment_id=raw_signal.equipment_id,
+        recorded_at=raw_signal.recorded_at,
+        sample_rate=raw_signal.sample_rate_hz,
+        total_samples=raw_signal.samples_count,
+        phases=phases,
+        metadata=metadata,
+        processing_status=raw_signal.processing_status
+    )
 
 
 @router.get("/signals", response_model=SignalListResponse)
@@ -342,8 +178,8 @@ async def list_signals(
 
         # Извлекаем имя файла из метаданных
         file_name = None
-        if signal.metadata:
-            file_name = signal.metadata.get('original_filename')
+        if signal.meta:
+            file_name = signal.meta.get('original_filename')
 
         item = SignalListItem(
             raw_signal_id=signal.id,

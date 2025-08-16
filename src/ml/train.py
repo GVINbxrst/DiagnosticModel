@@ -11,7 +11,7 @@
 import json
 import pickle
 import warnings
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -172,7 +172,7 @@ async def train_isolation_forest(output_path: Optional[str] = None, n_estimators
         'path': str(model_path),
         'n_features': len(non_empty),
         'n_estimators': n_estimators,
-        'updated_at': datetime.utcnow().isoformat()
+    'updated_at': datetime.now(UTC).isoformat()
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
 
@@ -851,7 +851,7 @@ class AnomalyModelTrainer:
             df_viz['is_anomaly_db'] = self.models.dbscan_labels == -1
 
             # Группируем по часам и считаем аномалии
-            df_viz['hour'] = pd.to_datetime(df_viz['window_start']).dt.floor('H')
+            df_viz['hour'] = pd.to_datetime(df_viz['window_start']).dt.floor('h')
 
             hourly_stats = df_viz.groupby('hour').agg({
                 'is_anomaly_if': ['sum', 'count'],

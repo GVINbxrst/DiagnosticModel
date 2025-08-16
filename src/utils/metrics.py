@@ -8,6 +8,7 @@ from functools import wraps
 from typing import Dict, Optional, Callable, Any
 import asyncio
 from datetime import datetime
+import inspect
 
 from prometheus_client import (
     Counter, Histogram, Gauge, Info,
@@ -36,6 +37,9 @@ def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] 
     if metric is None:
         logger.warning(f"Метрика {name} не найдена для observe_histogram")
         return
+    import inspect
+    import asyncio
+
     if labels:
         metric.labels(**labels).observe(value)
     else:
@@ -330,5 +334,25 @@ __all__ = [
     'database_connections_active', 'database_query_duration_seconds', 'app_info',
     'increment_counter', 'observe_histogram', 'set_gauge', 'get_metrics', 'get_all_metrics', 'observe_latency',
     'metrics_collector',
-    'increment', 'observe', 'track_worker_task'
+    'increment', 'observe', 'track_worker_task', 'safe_add'
 ]
+
+
+async def safe_add(session, instance):
+    """Безопасно вызвать session.add для реальной сессии или моков.
+
+    Цели:
+    - Не вызывать предупреждения об не-await coroutine если add замокан через AsyncMock
+    - Унифицированно поддерживать синхронный add (реальный AsyncSession) и асинхронный (мок)
+    """
+    add_attr = getattr(session, 'add', None)
+    if add_attr is None:
+        logger.debug('safe_add: у сессии отсутствует метод add')
+        return
+    try:
+        res = add_attr(instance)
+        if inspect.isawaitable(res):
+            await res
+    except Exception as e:  # pragma: no cover - защитный слой
+        logger.debug(f'safe_add: ошибка при добавлении объекта: {e}')
+        raise

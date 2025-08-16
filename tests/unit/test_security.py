@@ -4,10 +4,10 @@
 
 import pytest
 import asyncio
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 from unittest.mock import Mock, AsyncMock, patch
 from uuid import uuid4
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 from src.api.main import app
 from src.api.middleware.security import enhanced_jwt_handler, audit_logger, AuditActionType, AuditResult
@@ -179,8 +179,8 @@ class TestEnhancedJWTHandler:
             "username": "test",
             "role": "operator",
             "type": "access",
-            "exp": datetime.utcnow() - timedelta(hours=1),
-            "iat": datetime.utcnow() - timedelta(hours=2)
+            "exp": datetime.now(UTC) - timedelta(hours=1),
+            "iat": datetime.now(UTC) - timedelta(hours=2)
         }
 
         expired_token = jwt.encode(
@@ -199,7 +199,7 @@ class TestSecurityEndpoints:
     @pytest.mark.asyncio
     async def test_login_with_audit_logging(self):
         """Тест авторизации с audit-логированием"""
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
             with patch('src.api.routes.auth.authenticate_user') as mock_auth:
                 with patch('src.api.middleware.security.get_async_session') as mock_session_ctx:
                     mock_session = AsyncMock()
@@ -208,7 +208,7 @@ class TestSecurityEndpoints:
                     mock_user = Mock()
                     mock_user.id = uuid4()
                     mock_user.username = "test_user"
-                    mock_user.role.value = "operator"
+                    mock_user.role = "operator"
                     mock_user.is_active = True
                     mock_auth.return_value = mock_user
 
@@ -220,13 +220,12 @@ class TestSecurityEndpoints:
                     response = await ac.post("/auth/login", json=login_data)
 
                     assert response.status_code == 200
-                    # Проверяем, что audit лог был записан
                     mock_session.execute.assert_called()
 
     @pytest.mark.asyncio
     async def test_failed_login_audit_logging(self):
         """Тест логирования неудачной авторизации"""
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
             with patch('src.api.routes.auth.authenticate_user') as mock_auth:
                 with patch('src.api.middleware.security.get_async_session') as mock_session_ctx:
                     mock_session = AsyncMock()
@@ -242,28 +241,24 @@ class TestSecurityEndpoints:
                     response = await ac.post("/auth/login", json=login_data)
 
                     assert response.status_code == 401
-                    # Проверяем, что неудачная попытка была залогирована
                     mock_session.execute.assert_called()
 
     @pytest.mark.asyncio
     async def test_admin_security_endpoints_access(self, admin_token):
         """Тест доступа к административным эндпоинтам"""
         headers = {"Authorization": f"Bearer {admin_token}"}
-
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
             with patch('src.api.middleware.auth.get_current_user') as mock_get_user:
                 with patch('src.api.middleware.security.get_async_session') as mock_session_ctx:
                     mock_session = AsyncMock()
                     mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
-                    # Мокаем текущего пользователя
                     mock_user = Mock()
                     mock_user.id = uuid4()
                     mock_user.username = "admin"
                     mock_user.role = "admin"
                     mock_get_user.return_value = mock_user
 
-                    # Мокаем результат SQL запроса
                     mock_result = Mock()
                     mock_result.fetchall.return_value = []
                     mock_result.scalar.return_value = 0
@@ -271,21 +266,18 @@ class TestSecurityEndpoints:
 
                     response = await ac.get("/admin/security/audit-logs", headers=headers)
 
-                    # Должен быть доступ у администратора
-                    assert response.status_code in [200, 422]  # 422 если проблемы с валидацией в тестах
+                    assert response.status_code in [200, 422]
 
     @pytest.mark.asyncio
     async def test_operator_denied_admin_endpoints(self, operator_token):
         """Тест запрета доступа оператора к административным эндпоинтам"""
         headers = {"Authorization": f"Bearer {operator_token}"}
-
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
             with patch('src.api.middleware.auth.get_current_user') as mock_get_user:
                 with patch('src.api.middleware.security.get_async_session') as mock_session_ctx:
                     mock_session = AsyncMock()
                     mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
-                    # Мокаем пользователя-оператора
                     mock_user = Mock()
                     mock_user.id = uuid4()
                     mock_user.username = "operator"
@@ -294,7 +286,6 @@ class TestSecurityEndpoints:
 
                     response = await ac.get("/admin/security/audit-logs", headers=headers)
 
-                    # Оператор должен получить отказ
                     assert response.status_code == 403
 
 
@@ -304,32 +295,27 @@ class TestSecurityMiddleware:
     @pytest.mark.asyncio
     async def test_audit_middleware_logs_protected_endpoints(self):
         """Тест автоматического логирования защищенных эндпоинтов"""
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
             with patch('src.api.middleware.security.get_async_session') as mock_session_ctx:
                 mock_session = AsyncMock()
                 mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
-                # Попытка доступа к защищенному эндпоинту без токена
                 response = await ac.get("/api/v1/signals")
 
-                # Должен быть логирован как неавторизованный доступ
                 assert response.status_code in [401, 403]
-                # Проверяем, что audit лог был записан
                 mock_session.execute.assert_called()
 
     @pytest.mark.asyncio
     async def test_audit_middleware_skips_excluded_paths(self):
         """Тест пропуска служебных эндпоинтов"""
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
             with patch('src.api.middleware.security.get_async_session') as mock_session_ctx:
                 mock_session = AsyncMock()
                 mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
-                # Доступ к служебному эндпоинту
                 response = await ac.get("/health")
 
                 assert response.status_code == 200
-                # Для служебных эндпоинтов audit лог не должен записываться
                 mock_session.execute.assert_not_called()
 
 

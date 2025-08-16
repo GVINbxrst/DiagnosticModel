@@ -10,6 +10,15 @@ These were redundant after introducing `UniversalUUID` TypeDecorator and could m
 from __future__ import annotations
 
 import inspect
+import sqlite3
+from datetime import datetime
+
+# Silence Python 3.12+ sqlite datetime adapter deprecation by registering explicit adapters/converters
+try:  # pragma: no cover - environment dependent
+    # Store datetime as ISO string
+    sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
+except Exception:
+    pass
 
 try:
     import httpx  # type: ignore

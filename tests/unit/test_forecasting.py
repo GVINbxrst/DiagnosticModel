@@ -23,7 +23,7 @@ from src.ml.forecasting import (
 @pytest.fixture
 def sample_time_series():
     """Создает образец временного ряда для тестирования"""
-    dates = pd.date_range(start='2024-01-01', periods=100, freq='H')
+    dates = pd.date_range(start='2024-01-01', periods=100, freq='h')
     values = np.random.normal(10, 2, 100) + np.sin(np.arange(100) * 0.1) * 3
     return pd.DataFrame({
         'timestamp': dates,
@@ -34,7 +34,7 @@ def sample_time_series():
 @pytest.fixture
 def rms_data():
     """Создает образец данных RMS"""
-    dates = pd.date_range(start='2024-01-01', periods=200, freq='H')
+    dates = pd.date_range(start='2024-01-01', periods=200, freq='h')
     rms_a = np.random.normal(5.0, 0.5, 200) + np.sin(np.arange(200) * 0.05) * 0.3
     return pd.DataFrame({
         'timestamp': dates,
@@ -62,7 +62,7 @@ class TestTimeSeriesPreprocessor:
 
         # Создаем слишком малый датасет
         small_df = pd.DataFrame({
-            'timestamp': pd.date_range(start='2024-01-01', periods=10, freq='H'),
+            'timestamp': pd.date_range(start='2024-01-01', periods=10, freq='h'),
             'value': np.random.normal(10, 2, 10)
         })
 
@@ -182,7 +182,7 @@ class TestProphetForecaster:
         forecaster = ProphetForecaster()
 
         small_df = pd.DataFrame({
-            'ds': pd.date_range(start='2024-01-01', periods=10, freq='H'),
+            'ds': pd.date_range(start='2024-01-01', periods=10, freq='h'),
             'y': np.random.normal(0, 1, 10)
         })
 
@@ -229,7 +229,7 @@ class TestRMSTrendForecaster:
         with patch.object(forecaster, 'load_rms_data') as mock_load:
             # Мокаем загрузку данных
             mock_load.return_value = pd.DataFrame({
-                'timestamp': pd.date_range(start='2024-01-01', periods=100, freq='H'),
+                'timestamp': pd.date_range(start='2024-01-01', periods=100, freq='h'),
                 'rms_a': np.random.normal(5.0, 0.5, 100)
             })
 

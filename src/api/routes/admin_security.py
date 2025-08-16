@@ -2,7 +2,7 @@
 Административные эндпоинты для управления безопасностью и audit-логами
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
@@ -204,7 +204,7 @@ async def get_audit_summary(
         action_description=f"Accessed audit summary for {hours_back} hours"
     )
 
-    start_time = datetime.utcnow() - timedelta(hours=hours_back)
+    start_time = datetime.now(UTC) - timedelta(hours=hours_back)
 
     # Запрос сводной статистики
     summary_query = text("""
@@ -269,7 +269,7 @@ async def get_audit_summary(
     return {
         'period': {
             'start_time': start_time.isoformat(),
-            'end_time': datetime.utcnow().isoformat(),
+            'end_time': datetime.now(UTC).isoformat(),
             'hours_covered': hours_back
         },
         'summary': [
@@ -344,7 +344,7 @@ async def get_suspicious_activity(
             for row in suspicious_data
         ],
         'total_suspicious_users': len(suspicious_data),
-        'check_timestamp': datetime.utcnow().isoformat()
+    'check_timestamp': datetime.now(UTC).isoformat()
     }
 
 
@@ -454,7 +454,7 @@ async def revoke_user_sessions(
     return {
         "message": f"All sessions revoked for user {target_user.username}",
         "revoked_by": current_user.username,
-        "timestamp": datetime.utcnow().isoformat()
+    "timestamp": datetime.now(UTC).isoformat()
     }
 
 
@@ -480,7 +480,7 @@ async def cleanup_expired_sessions(
 
     return {
         "message": f"Cleaned up {cleaned_count} expired sessions",
-        "timestamp": datetime.utcnow().isoformat()
+    "timestamp": datetime.now(UTC).isoformat()
     }
 
 
@@ -504,7 +504,7 @@ async def get_security_metrics(
     )
 
     # Метрики за последние 24 часа
-    last_24h = datetime.utcnow() - timedelta(hours=24)
+    last_24h = datetime.now(UTC) - timedelta(hours=24)
 
     metrics_query = text("""
         SELECT 
@@ -564,5 +564,5 @@ async def get_security_metrics(
     return {
         'security_metrics': metrics,
         'period': '24 hours',
-        'timestamp': datetime.utcnow().isoformat()
+    'timestamp': datetime.now(UTC).isoformat()
     }

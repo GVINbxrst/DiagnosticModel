@@ -9,6 +9,7 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.auth import require_operator
@@ -157,7 +158,10 @@ async def upload_csv_file(
                         location='test',
                         specifications={'auto_created': True}
                     )
-                    session.add(new_eq)
+                    from src.utils.metrics import safe_add
+                    add_res = safe_add(session, new_eq)
+                    if inspect.isawaitable(add_res):
+                        await add_res
                     await session.commit()
                     await session.refresh(new_eq)
                     target_equipment_id_local = new_eq.id
@@ -246,7 +250,10 @@ async def _create_equipment_from_filename(
         }
     )
 
-    session.add(new_equipment)
+    from src.utils.metrics import safe_add
+    add_res = safe_add(session, new_equipment)
+    if inspect.isawaitable(add_res):
+        await add_res
     await session.commit()
     await session.refresh(new_equipment)
 
