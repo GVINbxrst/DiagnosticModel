@@ -1,0 +1,279 @@
+diff --git a/src/data_processing/csv_loader.py b/src/data_processing/csv_loader.py
+--- a/src/data_processing/csv_loader.py
++++ b/src/data_processing/csv_loader.py
+@@
+     async def load_file(self, path: Union[str, Path], *, raw_id: Optional[UUID] = None, sample_rate: int = DEFAULT_SAMPLE_RATE) -> Tuple[Dict[str, np.ndarray], Dict[str, str], CSVProcessingStats]:
+         """Новый интерфейс для пайплайна worker.process_raw.
+
+         Если передан raw_id – НЕ создаёт новую запись, а заполняет существующую RawSignal
+         (phase_a/phase_b/phase_c, samples_count, file_name, file_hash) и возвращает:
+             (data_dict, phase_status, stats)
+
+         data_dict: {'R': np.ndarray, 'S': np.ndarray, 'T': np.ndarray}
+         phase_status: {'R': 'ok|missing', ...}
+         stats: CSVProcessingStats (raw_signal_ids содержит raw_id)
+         """
+         path = Path(path)
+         if not path.exists():
+             raise FileNotFoundError(path)
+         stats = CSVProcessingStats()
+         data_lists = {'R': [], 'S': [], 'T': []}
+         import csv
+         with open(path, 'r', encoding='utf-8') as f:
+             reader = csv.reader(f)
+             header = next(reader, None)
+             if not header:
+                 raise InvalidCSVFormatError("Пустой файл")
+             header_line = header[0] if len(header) == 1 else ','.join(header)
+             parse_csv_header(header_line)
+             for row in reader:
+                 if not row:
+                     continue
+                 line = row[0] if len(row) == 1 else ','.join(row)
+                 values, mask = parse_csv_row(line)
+                 for i, phase in enumerate(['R','S','T']):
+                     data_lists[phase].append(values[i])
+                 stats.processed_rows += 1
+         data_arrays: Dict[str, np.ndarray] = {}
+         for phase in ['R','S','T']:
+             if len(data_lists[phase]) == 0:
+                 data_arrays[phase] = np.array([], dtype=np.float32)
+             else:
+                 data_arrays[phase] = np.array(data_lists[phase], dtype=np.float32)
+             nan_count = int(np.sum(np.isnan(data_arrays[phase])))
+             stats.nan_values[phase] = nan_count
+         stats.total_rows = stats.processed_rows
+         stats.finish()
+         if raw_id is not None:
+             async with get_async_session() as session:
+                 rs = await session.get(RawSignal, raw_id)
+                 if rs:
+                     from src.utils.serialization import dump_float32_array
+                     rs.samples_count = max(len(data_arrays['R']), len(data_arrays['S']), len(data_arrays['T']))
+                     rs.sample_rate_hz = sample_rate
+                     rs.file_name = path.name
+                     rs.file_hash = calculate_file_hash(path)
+                     rs.phase_a = dump_float32_array(data_arrays['R']) if data_arrays['R'].size else None
+                     rs.phase_b = dump_float32_array(data_arrays['S']) if data_arrays['S'].size else None
+                     rs.phase_c = dump_float32_array(data_arrays['T']) if data_arrays['T'].size else None
+                     await session.commit()
+         stats.raw_signal_ids = [raw_id] if raw_id else stats.raw_signal_ids
+         return data_arrays, stats.phase_status, stats
+
+diff --git a/src/worker/tasks.py b/src/worker/tasks.py
+--- a/src/worker/tasks.py
++++ b/src/worker/tasks.py
+@@
+ async def _process_raw_pipeline_async(raw_id: str, path: str) -> Dict:
+     """Минимальный пайплайн согласно ТЗ Блок 1.
+     1) status -> PROCESSING
+     2) CSVLoader.load_file(path, raw_id=raw_id)
+     3) DataValidator.validate(...) -> при CRITICAL/ERROR -> FAILED
+     4) FeatureExtractor.process_raw_signal -> признаки
+     5) status -> COMPLETED
+     """
+     await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
+     from src.data_processing.csv_loader import CSVLoader
+     from src.data_processing.data_validator import DataValidator
+     from src.data_processing.feature_extraction import FeatureExtractor, InsufficientDataError
+     loader = CSVLoader()
+     data_dict, phase_status, stats = await loader.load_file(path, raw_id=UUID(raw_id))
+     validator = DataValidator()
+     validation_results = validator.validate_csv_data({k: v.tolist() for k, v in data_dict.items()}, sample_rate=25600, filename=path)
+     if validator.has_critical_errors(validation_results):
+         await _update_signal_status(raw_id, ProcessingStatus.FAILED, 'critical validation errors')
+         return {'status': 'failed', 'raw_signal_id': raw_id, 'errors': [r.message for r in validation_results if r.severity.value in ('critical','error')]}
+     FECls = _get_feature_extractor_cls()
+     extractor = FECls(sample_rate=25600)
+     try:
+         feature_ids = await extractor.process_raw_signal(UUID(raw_id), window_duration_ms=1000, overlap_ratio=0.5)
+     except InsufficientDataError as ie:
+         await _update_signal_status(raw_id, ProcessingStatus.FAILED, str(ie))
+         return {'status': 'failed', 'raw_signal_id': raw_id, 'errors': [str(ie)]}
+     except Exception as e:
+         await _update_signal_status(raw_id, ProcessingStatus.FAILED, str(e))
+         raise
+     await _update_signal_status(raw_id, ProcessingStatus.COMPLETED)
+     return {'status': 'success', 'raw_signal_id': raw_id, 'feature_ids': [str(f) for f in feature_ids], 'phase_status': phase_status, 'csv_stats': stats.to_dict()}
+
+diff --git a/src/api/routes/upload.py b/src/api/routes/upload.py
+--- a/src/api/routes/upload.py
++++ b/src/api/routes/upload.py
+@@
+ from src.database.models import Equipment, RawSignal, ProcessingStatus
+diff --git a/src/database/models.py b/src/database/models.py
+index 5e0c..b3c1 100644
+--- a/src/database/models.py
++++ b/src/database/models.py
+@@
+     processing_status: Mapped[ProcessingStatus] = mapped_column(
+         Enum(ProcessingStatus, values_callable=lambda c: [e.value for e in c]),
+         nullable=False,
+-        default=ProcessingStatus.PENDING
++        default=ProcessingStatus.PENDING,
++        index=True
+     )
+ diff --git a/src/worker/config.py b/src/worker/config.py
+index 1111..2222 100644
+--- a/src/worker/config.py
++++ b/src/worker/config.py
+@@
+-<original removed for brevity>
++"""Минимальная (единая) конфигурация Celery согласно требованиям Блока 1.
++
++Сохраняем имя проекта 'diagmod' и используем настройки брокера/бэкенда из settings
++через CELERY_BROKER_URL / CELERY_RESULT_BACKEND. Остальной расширенный тюнинг
++не удалён намеренно в других местах проекта (можно восстановить при надобности),
++но для базовой работоспособности пайплайна достаточно данной конфигурации.
++"""
++
++from celery import Celery
++
++from src.config.settings import get_settings
++
++settings = get_settings()
++
++celery_app = Celery(
++    'diagmod',
++    broker=settings.CELERY_BROKER_URL,
++    backend=settings.CELERY_RESULT_BACKEND
++)
++
++celery_app.conf.update(
++    task_serializer='json',
++    accept_content=['json'],
++    result_serializer='json',
++    timezone='UTC',
++    enable_utc=True,
++    task_acks_late=True,
++    worker_prefetch_multiplier=1,
++    task_track_started=True,
++    task_time_limit=3600,
++    task_soft_time_limit=3300,
++)
++
++celery_app.autodiscover_tasks([
++    'src.worker.tasks'
++])
++
++__all__ = ["celery_app"]
+ diff --git a/src/worker/tasks.py b/src/worker/tasks.py
+index 3333..4444 100644
+--- a/src/worker/tasks.py
++++ b/src/worker/tasks.py
+@@
+-@celery_app.task(
+-    bind=True,
+-    base=DatabaseTask,
+-    autoretry_for=(Exception,),
+-    retry_kwargs={'max_retries': 3, 'countdown': 60},
+-    retry_backoff=True, retry_jitter=True
+-)
+-@_observe_latency('worker_task_duration_seconds', labels={'task_name': 'process_raw'})
+-def process_raw(self, raw_id: str) -> Dict:
+-    """Celery оболочка для асинхронной обработки сырого сигнала."""
+-    started = datetime.now(UTC)
+-    try:
+-        result = asyncio.run(_process_raw_async(raw_id))
+-        result['processing_time_seconds'] = (datetime.now(UTC) - started).total_seconds()
+-        return result
+-    except Exception as exc:  # pragma: no cover - ретраи
+-        try:
+-            asyncio.run(_update_signal_status(raw_id, ProcessingStatus.FAILED, str(exc)))
+-        finally:
+-            if self.request.retries < self.max_retries:
+-                raise self.retry(countdown=60 * (self.request.retries + 1))
+-        raise
++@celery_app.task(
++    bind=True,
++    base=DatabaseTask,
++    autoretry_for=(Exception,),
++    retry_kwargs={'max_retries': 3, 'countdown': 60},
++    retry_backoff=True, retry_jitter=True,
++    name='src.worker.tasks.process_raw'
++)
++@_observe_latency('worker_task_duration_seconds', labels={'task_name': 'process_raw'})
++def process_raw(self, raw_id: str, path: str) -> Dict:
++    """Пайплайн обработки загруженного файла: обновление статуса, валидация, признаки."""
++    started = datetime.now(UTC)
++    try:
++        result = asyncio.run(_process_raw_pipeline_async(raw_id, path))
++        result['processing_time_seconds'] = (datetime.now(UTC) - started).total_seconds()
++        return result
++    except Exception as exc:  # pragma: no cover
++        try:
++            asyncio.run(_update_signal_status(raw_id, ProcessingStatus.FAILED, str(exc)))
++        finally:
++            if self.request.retries < self.max_retries:
++                raise self.retry(countdown=60 * (self.request.retries + 1))
++        raise
+@@
++async def _process_raw_pipeline_async(raw_id: str, path: str) -> Dict:
++    await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
++    from src.data_processing.csv_loader import CSVLoader
++    from src.data_processing.data_validator import DataValidator
++    from src.data_processing.feature_extraction import FeatureExtractor, InsufficientDataError
++    import csv, numpy as np
++    phase_arrays = {'R': [], 'S': [], 'T': []}
++    with open(path, 'r', encoding='utf-8') as f:
++        reader = csv.reader(f)
++        _ = next(reader, None)
++        for row in reader:
++            if not row:
++                continue
++            line = row[0] if len(row) == 1 else ','.join(row)
++            parts = [p.strip() for p in line.split(',')]
++            while len(parts) < 3:
++                parts.append('')
++            for i, key in enumerate(['R','S','T']):
++                try:
++                    v = float(parts[i]) if parts[i] not in ('', 'nan', 'NaN', 'None') else float('nan')
++                except Exception:
++                    v = float('nan')
++                phase_arrays[key].append(v)
++    for k,v in phase_arrays.items():
++        phase_arrays[k] = np.array(v, dtype=np.float32)
++    validator = DataValidator()
++    validation_results = validator.validate_csv_data({k: v.tolist() for k,v in phase_arrays.items()}, 25600, path)
++    if validator.has_critical_errors(validation_results):
++        await _update_signal_status(raw_id, ProcessingStatus.FAILED, 'critical validation errors')
++        return {'status':'failed','raw_signal_id':raw_id,'errors':[r.message for r in validation_results]}
++    extractor = FeatureExtractor(sample_rate=25600)
++    try:
++        feature_ids = await extractor.process_raw_signal(UUID(raw_id))
++    except InsufficientDataError as ie:
++        await _update_signal_status(raw_id, ProcessingStatus.FAILED, str(ie))
++        return {'status':'failed','raw_signal_id':raw_id,'errors':[str(ie)]}
++    await _update_signal_status(raw_id, ProcessingStatus.COMPLETED)
++    return {'status':'success','raw_signal_id':raw_id,'feature_ids':[str(f) for f in feature_ids]}
+ diff --git a/src/api/routes/upload.py b/src/api/routes/upload.py
+index 5555..6666 100644
+--- a/src/api/routes/upload.py
++++ b/src/api/routes/upload.py
+@@
+-from src.worker.tasks import process_raw
++from src.worker.tasks import process_raw
++from src.config.settings import get_settings
+@@
+-@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/upload'})
++@observe_latency('api_request_duration_seconds', labels={'endpoint':'upload','method':'POST'})
+@@
+-        if st.is_testing or st.CELERY_TASK_ALWAYS_EAGER:
+-            from src.worker.tasks import _process_raw_async  # type: ignore
+-            await _process_raw_async(str(raw_id))
+-            task_id = f"direct-{raw_id}"
+-            status_str = 'queued'
+-        else:
+-            task_async = process_raw.delay(str(raw_id))
+-            task_id = task_async.id
+-            status_str = 'queued'
++        if st.is_testing or getattr(st, 'CELERY_TASK_ALWAYS_EAGER', False):
++            from src.worker.tasks import _process_raw_pipeline_async  # type: ignore
++            await _process_raw_pipeline_async(str(raw_id), tmp_path)
++            task_id = f"direct-{raw_id}"
++            status_str = 'queued'
++        else:
++            task_async = process_raw.delay(str(raw_id), tmp_path)
++            task_id = task_async.id
++            status_str = 'queued'
+*** End Patch

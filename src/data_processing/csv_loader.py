@@ -488,6 +488,68 @@ class CSVLoader:
 
         return stats
 
+    # Короткое имя согласно требованию блока 1: CSVLoader.load_file(path) -> data, phase_status, stats
+    async def load_file(self, path: Union[str, Path], *, raw_id: Optional[UUID] = None, sample_rate: int = DEFAULT_SAMPLE_RATE) -> Tuple[Dict[str, np.ndarray], Dict[str, str], CSVProcessingStats]:
+        """Новый интерфейс для пайплайна worker.process_raw.
+
+        Если передан raw_id – НЕ создаёт новую запись, а заполняет существующую RawSignal
+        (phase_a/phase_b/phase_c, samples_count, file_name, file_hash) и возвращает:
+            (data_dict, phase_status, stats)
+
+        data_dict: {'R': np.ndarray, 'S': np.ndarray, 'T': np.ndarray}
+        phase_status: {'R': 'ok|missing', ...}
+        stats: CSVProcessingStats (raw_signal_ids содержит raw_id)
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        stats = CSVProcessingStats()
+        data_lists = {'R': [], 'S': [], 'T': []}
+        import csv
+        with open(path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header:
+                raise InvalidCSVFormatError("Пустой файл")
+            # поддержка одного столбца с заголовком
+            header_line = header[0] if len(header) == 1 else ','.join(header)
+            parse_csv_header(header_line)
+            for row in reader:
+                if not row:
+                    continue
+                line = row[0] if len(row) == 1 else ','.join(row)
+                values, mask = parse_csv_row(line)
+                for i, phase in enumerate(['R','S','T']):
+                    data_lists[phase].append(values[i])
+                stats.processed_rows += 1
+        # Формируем numpy массивы
+        data_arrays: Dict[str, np.ndarray] = {}
+        for phase in ['R','S','T']:
+            if len(data_lists[phase]) == 0:
+                data_arrays[phase] = np.array([], dtype=np.float32)
+            else:
+                data_arrays[phase] = np.array(data_lists[phase], dtype=np.float32)
+            nan_count = int(np.sum(np.isnan(data_arrays[phase])))
+            stats.nan_values[phase] = nan_count
+        stats.total_rows = stats.processed_rows
+        stats.finish()
+        if raw_id is not None:
+            # Обновляем существующий RawSignal
+            async with get_async_session() as session:
+                rs = await session.get(RawSignal, raw_id)
+                if rs:
+                    from src.utils.serialization import dump_float32_array
+                    rs.samples_count = max(len(data_arrays['R']), len(data_arrays['S']), len(data_arrays['T']))
+                    rs.sample_rate_hz = sample_rate
+                    rs.file_name = path.name
+                    rs.file_hash = calculate_file_hash(path)
+                    rs.phase_a = dump_float32_array(data_arrays['R']) if data_arrays['R'].size else None
+                    rs.phase_b = dump_float32_array(data_arrays['S']) if data_arrays['S'].size else None
+                    rs.phase_c = dump_float32_array(data_arrays['T']) if data_arrays['T'].size else None
+                    await session.commit()
+        stats.raw_signal_ids = [raw_id] if raw_id else stats.raw_signal_ids
+        return data_arrays, stats.phase_status, stats
+
     async def _process_csv_file_batches(
         self,
         file_path: Path,

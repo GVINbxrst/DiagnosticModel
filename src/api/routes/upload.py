@@ -1,3 +1,4 @@
+from src.database.models import Equipment, RawSignal, ProcessingStatus
 """
 Роутер для загрузки CSV файлов с токовыми сигналами
 """
@@ -20,13 +21,14 @@ from src.database.connection import get_async_session
 from src.database.models import Equipment
 from src.worker.tasks import process_raw
 from src.utils.logger import get_logger
+from src.config.settings import get_settings
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 
 @router.post("/upload")
-@observe_latency('api_request_duration_seconds', labels={'method':'POST','endpoint':'/upload'})
+@observe_latency('api_request_duration_seconds', labels={'endpoint':'upload','method':'POST'})
 async def upload_csv_file(
     file: UploadFile = File(..., description="CSV файл с токовыми сигналами"),
     equipment_id: Optional[str] = Form(None, description="ID оборудования (UUID)"),
@@ -189,31 +191,34 @@ async def upload_csv_file(
             os.unlink(tmp_path)
             raise HTTPException(status_code=500, detail="Ошибка обработки файла")
     finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        # Не удаляем временный файл до постановки Celery задачи: он нужен worker'у или
+        # прямому вызову пайплайна в eager режиме. Удалим позже после запуска задачи.
+        pass
 
-    # Ставим задачу Celery
+    # Ставим задачу Celery (новая сигнатура: raw_id + путь к временному файлу)
     try:
         raw_id_any = getattr(stats_or_id, 'raw_signal_id', None) or getattr(stats_or_id, 'raw_signal_ids', [None])[0] or stats_or_id
-        from uuid import UUID
-        raw_id_uuid = UUID(str(raw_id_any))
-        raw_id = raw_id_uuid
-        from src.config.settings import get_settings
+        raw_id = UUID(str(raw_id_any))
         st = get_settings()
-        if st.is_testing or st.CELERY_TASK_ALWAYS_EAGER:
-            from src.worker.tasks import _process_raw_async  # type: ignore
-            await _process_raw_async(str(raw_id))
+        if st.is_testing or getattr(st, 'CELERY_TASK_ALWAYS_EAGER', False):
+            from src.worker.tasks import _process_raw_pipeline_async  # type: ignore
+            await _process_raw_pipeline_async(str(raw_id), tmp_path)
             task_id = f"direct-{raw_id}"
-            status_str = 'queued'
         else:
-            task_async = process_raw.delay(str(raw_id))
+            task_async = process_raw.delay(str(raw_id), tmp_path)
             task_id = task_async.id
-            status_str = 'queued'
     except Exception as e:
         logger.error(f"Ошибка постановки задачи Celery: {e}")
         raise HTTPException(status_code=500, detail="Ошибка постановки задачи Celery")
+    finally:
+        # Теперь можно удалить временный файл
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
-    return {"raw_id": str(raw_id), "task_id": str(task_id), "status": status_str}
+    return {"raw_id": str(raw_id), "task_id": str(task_id), "status": 'queued'}
 
 @router.get("/upload")
 async def upload_get_guard():

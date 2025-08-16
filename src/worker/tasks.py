@@ -63,23 +63,33 @@ async def compress_and_store_results(data: Any) -> bytes:
         raise
 
 
-# ------------------ PROCESS RAW ------------------
+############################ NEW REQUIRED TASK ################################
 @celery_app.task(
     bind=True,
     base=DatabaseTask,
     autoretry_for=(Exception,),
     retry_kwargs={'max_retries': 3, 'countdown': 60},
-    retry_backoff=True, retry_jitter=True
+    retry_backoff=True, retry_jitter=True,
+    name='src.worker.tasks.process_raw'
 )
 @_observe_latency('worker_task_duration_seconds', labels={'task_name': 'process_raw'})
-def process_raw(self, raw_id: str) -> Dict:
-    """Celery оболочка для асинхронной обработки сырого сигнала."""
+def process_raw(self, raw_id: str, path: str) -> Dict:
+    """Обработка сырого CSV файла по пайплайну (требование Блока 1).
+
+    Steps:
+      1. Обновить статус RawSignal -> PROCESSING
+      2. CSVLoader.load_file(path) -> data / phase_status / stats
+      3. DataValidator.validate(data) -> при CRITICAL => FAILED
+      4. FeatureExtractor.extract(data) -> сохранить признаки
+      5. Пометить RawSignal COMPLETED
+    При любой необработанной ошибке -> FAILED
+    """
     started = datetime.now(UTC)
     try:
-        result = asyncio.run(_process_raw_async(raw_id))
+        result = asyncio.run(_process_raw_pipeline_async(raw_id, path))
         result['processing_time_seconds'] = (datetime.now(UTC) - started).total_seconds()
         return result
-    except Exception as exc:  # pragma: no cover - ретраи
+    except Exception as exc:  # pragma: no cover - ретраи/ошибки
         try:
             asyncio.run(_update_signal_status(raw_id, ProcessingStatus.FAILED, str(exc)))
         finally:
@@ -375,6 +385,43 @@ async def _forecast_trend_async(equipment_id: str) -> Dict:
         except Exception:
             pass
     return {'status': 'success', 'equipment_id': equipment_id, 'prediction_id': str(getattr(prediction, 'id', UUID(equipment_id))), 'summary': summary, 'forecast_steps': fc.get('forecast_steps', 0)}
+
+
+######################## Pipeline (CSV -> Validate -> Features) ########################
+async def _process_raw_pipeline_async(raw_id: str, path: str) -> Dict:
+    """Минимальный пайплайн согласно ТЗ Блок 1.
+    1) status -> PROCESSING
+    2) CSVLoader.load_file(path, raw_id=raw_id)
+    3) DataValidator.validate(...) -> при CRITICAL/ERROR -> FAILED
+    4) FeatureExtractor.process_raw_signal -> признаки
+    5) status -> COMPLETED
+    """
+    await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
+    from src.data_processing.csv_loader import CSVLoader
+    from src.data_processing.data_validator import DataValidator
+    from src.data_processing.feature_extraction import FeatureExtractor, InsufficientDataError
+    loader = CSVLoader()
+    data_dict, phase_status, stats = await loader.load_file(path, raw_id=UUID(raw_id))
+    # Преобразуем к спискам для валидатора
+    validator = DataValidator()
+    validation_results = validator.validate_csv_data({k: v.tolist() for k, v in data_dict.items()}, sample_rate=25600, filename=path)
+    if validator.has_critical_errors(validation_results):
+        await _update_signal_status(raw_id, ProcessingStatus.FAILED, 'critical validation errors')
+        return {'status': 'failed', 'raw_signal_id': raw_id, 'errors': [r.message for r in validation_results if r.severity.value in ('critical','error')]}
+    # Извлечение признаков (используем FeatureExtractor.process_raw_signal для консистентности)
+    FECls = _get_feature_extractor_cls()
+    extractor = FECls(sample_rate=25600)
+    feature_ids: List[UUID] = []
+    try:
+        feature_ids = await extractor.process_raw_signal(UUID(raw_id), window_duration_ms=1000, overlap_ratio=0.5)
+    except InsufficientDataError as ie:
+        await _update_signal_status(raw_id, ProcessingStatus.FAILED, str(ie))
+        return {'status': 'failed', 'raw_signal_id': raw_id, 'errors': [str(ie)]}
+    except Exception as e:
+        await _update_signal_status(raw_id, ProcessingStatus.FAILED, str(e))
+        raise
+    await _update_signal_status(raw_id, ProcessingStatus.COMPLETED)
+    return {'status': 'success', 'raw_signal_id': raw_id, 'feature_ids': [str(f) for f in feature_ids]}
 
 
 @celery_app.task(bind=True, base=DatabaseTask)

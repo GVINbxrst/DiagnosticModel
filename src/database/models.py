@@ -201,7 +201,8 @@ class RawSignal(Base, TimestampMixin):
     processing_status: Mapped[ProcessingStatus] = mapped_column(
         Enum(ProcessingStatus, values_callable=lambda c: [e.value for e in c]),
         nullable=False,
-        default=ProcessingStatus.PENDING
+        default=ProcessingStatus.PENDING,
+        index=True
     )
 
     # Связи
@@ -398,3 +399,10 @@ class UserSession(Base):
         Index('idx_user_sessions_token_hash', 'token_hash'),
         Index('idx_user_sessions_expires_at', 'expires_at'),
     )
+
+# Экспорт требуемых сущностей
+__all__ = [
+    'Base', 'User', 'Equipment', 'DefectType', 'RawSignal', 'Feature', 'Prediction',
+    'SystemLog', 'UserSession', 'ProcessingStatus', 'EquipmentStatus', 'EquipmentType',
+    'DefectSeverity', 'UserRole'
+]
