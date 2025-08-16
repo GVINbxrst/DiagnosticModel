@@ -1,7 +1,4 @@
-"""
-Система логирования для DiagMod
-Структурированное JSON логирование с поддержкой различных уровней и выводов
-"""
+# Система логирования: структурированное JSON логирование
 
 import json
 import logging
@@ -22,7 +19,7 @@ from src.config.settings import get_settings
 
 
 class CustomJSONFormatter(jsonlogger.JsonFormatter):
-    """Кастомный JSON форматтер с дополнительными полями"""
+    # Кастомный JSON форматтер с доп. полями
 
     def add_fields(self, log_record: Dict[str, Any], record: logging.LogRecord, message_dict: Dict[str, Any]):
         super().add_fields(log_record, record, message_dict)
@@ -57,7 +54,7 @@ class CustomJSONFormatter(jsonlogger.JsonFormatter):
 
 
 class AuditLogger:
-    """Специализированный логгер для аудита действий пользователей"""
+    # Логгер аудита действий пользователей
 
     def __init__(self):
         self.logger = logging.getLogger('diagmod.audit')
@@ -65,7 +62,7 @@ class AuditLogger:
     def log_user_action(self, user_id: str, username: str, action: str,
                        resource: str, result: str, ip_address: str = None,
                        user_agent: str = None, additional_data: Dict = None):
-        """Логирование действий пользователя"""
+        # Лог действия пользователя
         audit_data = {
             'event_type': 'user_action',
             'user_id': user_id,
@@ -81,7 +78,7 @@ class AuditLogger:
 
     def log_api_request(self, user_id: str, endpoint: str, method: str,
                        status_code: int, response_time: float, ip_address: str):
-        """Логирование API запросов"""
+        # Лог API запроса
         api_data = {
             'event_type': 'api_request',
             'user_id': user_id,
@@ -95,7 +92,7 @@ class AuditLogger:
 
     def log_anomaly_detection(self, equipment_id: int, model_name: str,
                              is_anomaly: bool, confidence: float, features: Dict):
-        """Логирование обнаружения аномалий"""
+        # Лог обнаружения аномалий
         anomaly_data = {
             'event_type': 'anomaly_detection',
             'equipment_id': equipment_id,
@@ -108,7 +105,7 @@ class AuditLogger:
 
     def log_forecast_generation(self, equipment_id: int, model_name: str,
                                forecast_horizon: int, execution_time: float):
-        """Логирование генерации прогнозов"""
+        # Лог генерации прогноза
         forecast_data = {
             'event_type': 'forecast_generation',
             'equipment_id': equipment_id,
@@ -120,7 +117,7 @@ class AuditLogger:
 
 
 def setup_logging():
-    """Настроить систему логирования"""
+    # Настроить систему логирования
     settings = get_settings()
 
     # Создаем директорию для логов
@@ -211,14 +208,14 @@ def setup_logging():
 
 
 def get_logger(name: str = None) -> logging.Logger:
-    """Получить настроенный логгер"""
+    # Получить настроенный логгер
     if not name:
         name = 'diagmod'
     return logging.getLogger(name)
 
 
 def get_audit_logger() -> AuditLogger:
-    """Получить логгер аудита"""
+    # Получить логгер аудита
     return AuditLogger()
 
 

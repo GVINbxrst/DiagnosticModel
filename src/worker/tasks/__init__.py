@@ -1,12 +1,4 @@
-"""Адаптационный пакет `src.worker.tasks`.
-
-Из-за конфликта имён (файл `tasks.py` и пакет `tasks/`) Python выбирает пакет,
-а не файл. Нам нужно прозрачно предоставить объекты из файла `tasks.py`.
-
-Решение: динамически загружаем файл `tasks.py` под внутренним именем
-`src.worker._tasks_file` через importlib.spec_from_file_location и
-проксируем атрибуты. Это минимально инвазивно и не требует переименований.
-"""
+# Адаптационный пакет: проксирует объекты из tasks.py при конфликте имён
 
 from __future__ import annotations
 
@@ -23,13 +15,13 @@ _EXPORTED = [
 	'_process_raw_pipeline_async',
 	'decompress_signal_data', 'compress_and_store_results',
 	'_prepare_feature_vector', '_update_signal_status', 'get_async_session',
-	# Дополнительно для unit тестов (patch targets)
+	# Экспорт для unit-тестов (patch targets)
 	'FeatureExtractor', 'load_latest_models_async', 'RMSTrendForecaster'
 ]
 
 _TASKS_FILE_MODULE: Optional[ModuleType] = None
 
-def _load_tasks_file() -> ModuleType:  # pragma: no cover - инфраструктура
+def _load_tasks_file() -> ModuleType:  # pragma: no cover
 	global _TASKS_FILE_MODULE
 	if _TASKS_FILE_MODULE is not None:
 		return _TASKS_FILE_MODULE
@@ -44,14 +36,14 @@ def _load_tasks_file() -> ModuleType:  # pragma: no cover - инфраструк
 	_TASKS_FILE_MODULE = mod
 	return mod
 
-def __getattr__(name: str):  # pragma: no cover - инфраструктура
+def __getattr__(name: str):  # pragma: no cover
 	if name in _EXPORTED:
 		if name == 'get_async_session':
-			# Берём напрямую из database.connection чтобы patch('src.worker.tasks.get_async_session') работал
+			# Возврат прямой функции сессии (для patch в тестах)
 			from src.database.connection import get_async_session  # type: ignore
 			return get_async_session
 		mod = _load_tasks_file()
-		# Приводим имя celery задач к ожидаемому пространству имён tests (src.worker.tasks.*)
+	# Обновляем имя celery-задачи под пространство src.worker.tasks.*
 		if name in {'process_raw','detect_anomalies','forecast_trend'}:
 			task_obj = getattr(mod, name)
 			try:

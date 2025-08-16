@@ -1,12 +1,4 @@
-"""
-Модуль прогнозирования временных рядов для диагностики двигателей
-
-Этот модуль анализирует тренды RMS токов по фазам и выполняет прогнозирование:
-- Построение временных рядов RMS для каждой фазы
-- Использование ARIMA и Prophet для прогнозирования
-- Расчет вероятности превышения порогов (аномалии)
-- Работа без меток отказов (unsupervised подход)
-"""
+# Прогнозирование временных рядов RMS (ARIMA/Prophet, пороги, вероятности)
 
 import warnings
 from datetime import datetime, timedelta
@@ -40,27 +32,18 @@ SEASONALITY_PERIOD = 24  # Период сезонности (24 часа)
 
 
 class ForecastingError(Exception):
-    """Базовое исключение для прогнозирования"""
+    # Базовое исключение прогнозирования
     pass
 
 
 class InsufficientDataError(ForecastingError):
-    """Исключение для недостаточного количества данных"""
+    # Недостаточно данных
     pass
 
 
 # === MVP функция forecast_rms согласно контракту ===
 async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: float = 2.0):
-    """Упрощённый прогноз RMS по оборудованию.
-
-    Алгоритм (MVP):
-      1. Загружаем RMS (rms_a, rms_b, rms_c) из Feature по данному equipment_id через связь RawSignal.
-      2. Агрегируем средний RMS (среднее по доступным фазам) по времени window_start (часовое округление).
-      3. Если точек < MIN_OBSERVATIONS -> InsufficientDataError.
-      4. Прогноз: пытаемся использовать Prophet; если нет (ImportError) – fallback на простую экспоненциальную модель (moving average) или ARIMA(1,0,0).
-      5. Оценка вероятности превышения порога: берём sigma исторического ряда; threshold = mean + threshold_sigma*std; прогнозные значения > threshold – оцениваем p как долю.
-    Возвращает dict с forecast, threshold и probability_over_threshold.
-    """
+    # Упрощённый прогноз RMS (MVP)
     from sqlalchemy import select
     from src.database.connection import get_async_session
     from src.database.models import Feature, RawSignal
@@ -146,7 +129,7 @@ async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: f
 
 
 class TimeSeriesPreprocessor:
-    """Предобработчик временных рядов"""
+    # Предобработка временных рядов
     
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
@@ -157,17 +140,7 @@ class TimeSeriesPreprocessor:
         value_column: str,
         time_column: str = 'timestamp'
     ) -> pd.DataFrame:
-        """
-        Подготовить временной ряд для прогнозирования
-        
-        Args:
-            df: DataFrame с данными
-            value_column: Название колонки со значениями
-            time_column: Название колонки с временными метками
-            
-        Returns:
-            Подготовленный DataFrame
-        """
+        # Подготовить временной ряд
         # Копируем данные
         ts_df = df.copy()
         
@@ -202,7 +175,7 @@ class TimeSeriesPreprocessor:
         value_column: str,
         freq: str = '1h'
     ) -> pd.DataFrame:
-        """Ресемплинг к равномерной временной сетке"""
+        # Ресемплинг к равномерной сетке
         # Устанавливаем временной индекс
         df_resampled = df.set_index(time_column)
         
@@ -228,18 +201,7 @@ class TimeSeriesPreprocessor:
         method: str = 'iqr',
         multiplier: float = 1.5
     ) -> pd.DataFrame:
-        """
-        Обнаружение и обработка выбросов
-        
-        Args:
-            df: DataFrame с данными
-            value_column: Колонка со значениями
-            method: Метод обнаружения ('iqr', 'zscore')
-            multiplier: Множитель для порога
-            
-        Returns:
-            DataFrame с обработанными выбросами
-        """
+        # Обнаружение и обработка выбросов
         result_df = df.copy()
         values = result_df[value_column]
         
@@ -271,15 +233,7 @@ class TimeSeriesPreprocessor:
         return result_df
     
     def check_stationarity(self, series: pd.Series) -> Dict:
-        """
-        Проверка стационарности временного ряда с помощью теста Дики-Фуллера
-        
-        Args:
-            series: Временной ряд
-            
-        Returns:
-            Результаты теста стационарности
-        """
+        # Тест стационарности (ADF)
         # Подавляем предупреждения statsmodels
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -306,16 +260,7 @@ class TimeSeriesPreprocessor:
         return stationarity_result
     
     def make_stationary(self, series: pd.Series, max_diff: int = 2) -> Tuple[pd.Series, int]:
-        """
-        Приведение ряда к стационарному виду через дифференцирование
-        
-        Args:
-            series: Исходный временной ряд
-            max_diff: Максимальное количество дифференцирований
-            
-        Returns:
-            Кортеж (стационарный ряд, количество дифференцирований)
-        """
+        # Дифференцирование до стационарности
         diff_series = series.copy()
         diff_order = 0
         
@@ -335,7 +280,7 @@ class TimeSeriesPreprocessor:
 
 
 class ARIMAForecaster:
-    """Прогнозирование с помощью ARIMA модели"""
+    # Прогноз ARIMA
     
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
@@ -344,15 +289,7 @@ class ARIMAForecaster:
         self.preprocessor = TimeSeriesPreprocessor()
         
     def auto_arima_parameters(self, series: pd.Series) -> Tuple[int, int, int]:
-        """
-        Автоматический подбор параметров ARIMA (p, d, q)
-        
-        Args:
-            series: Временной ряд
-            
-        Returns:
-            Кортеж параметров (p, d, q)
-        """
+        # Автоподбор параметров ARIMA
         # Определяем порядок дифференцирования (d)
         _, d = self.preprocessor.make_stationary(series)
         
@@ -385,16 +322,7 @@ class ARIMAForecaster:
         return best_params
     
     def fit(self, series: pd.Series, order: Optional[Tuple[int, int, int]] = None) -> Dict:
-        """
-        Обучение ARIMA модели
-        
-        Args:
-            series: Временной ряд для обучения
-            order: Параметры ARIMA (p, d, q). Если None, подбираются автоматически
-            
-        Returns:
-            Результаты обучения
-        """
+        # Обучение модели ARIMA
         if len(series) < MIN_OBSERVATIONS:
             raise InsufficientDataError(f"Недостаточно данных для ARIMA: {len(series)} < {MIN_OBSERVATIONS}")
 
@@ -428,15 +356,7 @@ class ARIMAForecaster:
             return {'success': False, 'error': str(e)}
     
     def forecast(self, steps: int) -> Dict:
-        """
-        Прогнозирование на N шагов вперед
-        
-        Args:
-            steps: Количество шагов для прогноза
-            
-        Returns:
-            Результаты прогноза
-        """
+        # Прогноз на steps шагов
         if self.fitted_model is None:
                 raise ForecastingError("Модель не обучена")
         
@@ -466,24 +386,14 @@ class ARIMAForecaster:
 
 
 class ProphetForecaster:
-    """Прогнозирование с помощью Prophet"""
+    # Прогноз Prophet
     
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
         self.model = None
         
     def fit(self, df: pd.DataFrame, time_column: str = 'ds', value_column: str = 'y') -> Dict:
-        """
-        Обучение Prophet модели
-        
-        Args:
-            df: DataFrame с колонками 'ds' (время) и 'y' (значения)
-            time_column: Название колонки времени
-            value_column: Название колонки значений
-            
-        Returns:
-            Результаты обучения
-        """
+        # Обучение Prophet
         # Подготавливаем данные для Prophet
         prophet_df = df[[time_column, value_column]].copy()
         prophet_df.columns = ['ds', 'y']
@@ -527,16 +437,7 @@ class ProphetForecaster:
             return {'success': False, 'error': str(e)}
     
     def forecast(self, periods: int, freq: str = 'h') -> Dict:
-        """
-        Прогнозирование с помощью Prophet
-        
-        Args:
-            periods: Количество периодов для прогноза
-            freq: Частота прогноза ('h' - часы, 'D' - дни)
-            
-        Returns:
-            Результаты прогноза
-        """
+        # Прогноз Prophet
         if self.model is None:
                 raise ForecastingError("Модель не обучена")
         
@@ -582,7 +483,7 @@ class ProphetForecaster:
 
 
 class AnomalyProbabilityCalculator:
-    """Расчет вероятности аномалий на основе прогнозов"""
+    # Расчет вероятности аномалий
 
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
@@ -594,18 +495,7 @@ class AnomalyProbabilityCalculator:
         threshold: float,
         historical_std: float
     ) -> Dict:
-        """
-        Расчет вероятности превышения порога
-
-        Args:
-            forecast_values: Прогнозные значения
-            confidence_intervals: Нижние и верхние границы доверительного интервала
-            threshold: Пороговое значение для аномалии
-            historical_std: Историческое стандартное отклонение
-
-        Returns:
-            Результаты расчета вероятностей
-        """
+        # Вероятность превышения порога
         lower_ci, upper_ci = confidence_intervals
 
         probabilities = []
@@ -659,17 +549,7 @@ class AnomalyProbabilityCalculator:
         method: str = 'statistical',
         multiplier: float = DEFAULT_ANOMALY_THRESHOLD
     ) -> float:
-        """
-        Адаптивный расчет порога аномалии
-
-        Args:
-            historical_values: Исторические значения
-            method: Метод расчета ('statistical', 'quantile')
-            multiplier: Множитель для порога
-
-        Returns:
-            Пороговое значение
-        """
+        # Адаптивный расчет порога
         values = np.array(historical_values)
 
         if method == 'statistical':
@@ -692,7 +572,7 @@ class AnomalyProbabilityCalculator:
 
 
 class MotorRMSForecaster:
-    """Основной класс для прогнозирования RMS токов двигателя"""
+    # Прогнозирование RMS токов двигателя
     
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
@@ -708,19 +588,7 @@ class MotorRMSForecaster:
         limit: Optional[int] = None,
         session: Optional[AsyncSession] = None,
     ) -> pd.DataFrame:
-        """
-        Загрузить временной ряд RMS для конкретной фазы
-        
-        Args:
-            equipment_id: ID оборудования
-            phase: Фаза ('a', 'b', 'c')
-            start_time: Начальное время
-            end_time: Конечное время
-            limit: Максимальное количество записей
-            
-        Returns:
-            DataFrame с временным рядом RMS
-        """
+        # Загрузить временной ряд RMS по фазе
         phase_column_map = {'a': 'rms_a', 'b': 'rms_b', 'c': 'rms_c'}
 
         if phase not in phase_column_map:
@@ -790,20 +658,7 @@ class MotorRMSForecaster:
         preloaded_df: Optional[pd.DataFrame] = None,
         session: Optional[AsyncSession] = None,
     ) -> Dict:
-        """
-        Прогнозирование RMS для конкретной фазы
-        
-        Args:
-            equipment_id: ID оборудования
-            phase: Фаза ('a', 'b', 'c')
-            forecast_steps: Количество шагов прогноза
-            model_type: Тип модели ('arima', 'prophet', 'auto')
-            anomaly_threshold_method: Метод расчета порога аномалии
-            threshold_multiplier: Множитель для порога
-            
-        Returns:
-            Результаты прогнозирования
-        """
+        # Прогноз RMS для фазы
         try:
             # Загружаем данные (используем предзагруженный DataFrame если передан)
             if preloaded_df is not None:
@@ -894,7 +749,7 @@ class MotorRMSForecaster:
             raise ForecastingError(f"Ошибка прогнозирования фазы {phase}: {e}")
     
     def _select_best_forecast(self, forecast_results: Dict) -> Dict:
-        """Выбор лучшего прогноза из доступных"""
+        # Выбор лучшего прогноза
         if 'prophet' in forecast_results and forecast_results['prophet']['success']:
             # Prophet обычно лучше для данных с сезонностью
             return forecast_results['prophet']
@@ -909,17 +764,7 @@ class MotorRMSForecaster:
         forecast_steps: int = DEFAULT_FORECAST_STEPS,
         **kwargs
     ) -> Dict:
-        """
-        Прогнозирование для всех фаз двигателя
-        
-        Args:
-            equipment_id: ID оборудования
-            forecast_steps: Количество шагов прогноза
-            **kwargs: Дополнительные параметры для прогнозирования
-            
-        Returns:
-            Прогнозы для всех доступных фаз
-        """
+        # Прогноз для всех фаз
         phases = ['a', 'b', 'c']
         phase_names = {'a': 'R', 'b': 'S', 'c': 'T'}
 
@@ -980,13 +825,7 @@ class MotorRMSForecaster:
 
 # --- Совместимость с существующими задачами worker ---
 class RMSTrendForecaster:
-    """Обёртка для сохранения обратной совместимости.
-
-    Ранее задачи Celery использовали класс RMSTrendForecaster с методом
-    forecast_equipment_trends. В ходе рефакторинга основная реализация
-    сосредоточена в MotorRMSForecaster. Этот класс предоставляет прежний
-    интерфейс без упрощения бизнес-логики, делегируя работу MotorRMSForecaster.
-    """
+    # Обёртка совместимости (делегирует MotorRMSForecaster)
 
     def __init__(self):
         self._impl = MotorRMSForecaster()
@@ -1130,13 +969,7 @@ async def forecast_rms_trends(
     phases: Optional[List[str]] = None,
     **kwargs
 ) -> Dict:
-    """Высокоуровневая функция прогнозирования трендов RMS по фазам.
-
-    Оборачивает RMSTrendForecaster.forecast_equipment_trends, сохраняя
-    сигнатуру, которую используют тесты и потенциальный внешний код.
-    Не упрощает бизнес-логику: внутри используются те же механизмы
-    загрузки данных и анализа, что и в MotorRMSForecaster.
-    """
+    # Высокоуровневый прогноз трендов RMS
     forecaster = RMSTrendForecaster()
     return await forecaster.forecast_equipment_trends(
         equipment_id=equipment_id,
@@ -1151,10 +984,7 @@ async def get_anomaly_probability(
     forecast_steps: int = DEFAULT_FORECAST_STEPS,
     **kwargs
 ) -> float:
-    """Вернуть максимальную вероятность аномалии для оборудования.
-
-    При ошибке возвращает 0.0 (как ожидают тесты), логируя исключение.
-    """
+    # Макс вероятность аномалии (ошибка -> 0.0)
     try:
         result = await forecast_rms_trends(
             equipment_id=equipment_id,

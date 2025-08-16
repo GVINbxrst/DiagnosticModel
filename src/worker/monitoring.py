@@ -1,7 +1,4 @@
-"""
-Мониторинг и метрики для Celery Worker
-Интеграция с Prometheus и логированием выполнения задач
-"""
+# Мониторинг Celery Worker (метрики + логирование)
 import time
 import functools
 from typing import Dict, Any, Callable
@@ -22,7 +19,7 @@ audit_logger = get_audit_logger()
 
 
 class WorkerMetricsCollector:
-    """Коллектор метрик для Celery Worker"""
+    # Коллектор метрик Worker
 
     def __init__(self):
         self.active_tasks_count = 0
@@ -30,41 +27,41 @@ class WorkerMetricsCollector:
         self.setup_signal_handlers()
 
     def setup_signal_handlers(self):
-        """Настройка обработчиков сигналов Celery"""
+        # Настройка сигналов Celery
 
         @task_prerun.connect
         def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, **kwargs_extra):
-            """Обработчик начала выполнения задачи"""
+            # Начало задачи
             self.on_task_prerun(task_id, task.__name__, args, kwargs)
 
         @task_postrun.connect
         def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None,
                                retval=None, state=None, **kwargs_extra):
-            """Обработчик завершения выполнения задачи"""
+            # Завершение задачи
             self.on_task_postrun(task_id, task.__name__, state, retval)
 
         @task_failure.connect
         def task_failure_handler(sender=None, task_id=None, exception=None, traceback=None, einfo=None, **kwargs):
-            """Обработчик ошибки выполнения задачи"""
+            # Ошибка задачи
             self.on_task_failure(task_id, sender.__name__, exception, traceback)
 
         @task_success.connect
         def task_success_handler(sender=None, result=None, **kwargs):
-            """Обработчик успешного выполнения задачи"""
+            # Успех задачи
             self.on_task_success(sender.__name__, result)
 
         @worker_ready.connect
         def worker_ready_handler(sender=None, **kwargs):
-            """Обработчик готовности воркера"""
+            # Готовность воркера
             self.on_worker_ready(sender)
 
         @worker_shutdown.connect
         def worker_shutdown_handler(sender=None, **kwargs):
-            """Обработчик остановки воркера"""
+            # Остановка воркера
             self.on_worker_shutdown(sender)
 
     def on_task_prerun(self, task_id: str, task_name: str, args: tuple, kwargs: dict):
-        """Начало выполнения задачи"""
+        # Начало задачи
         self.active_tasks_count += 1
         self.task_start_times[task_id] = time.time()
 
@@ -84,7 +81,7 @@ class WorkerMetricsCollector:
         )
 
     def on_task_postrun(self, task_id: str, task_name: str, state: str, result: Any):
-        """Завершение выполнения задачи"""
+        # Завершение задачи
         self.active_tasks_count = max(0, self.active_tasks_count - 1)
 
         # Вычисляем время выполнения
@@ -131,7 +128,7 @@ class WorkerMetricsCollector:
             )
 
     def on_task_failure(self, task_id: str, task_name: str, exception: Exception, traceback: str):
-        """Ошибка выполнения задачи"""
+        # Ошибка задачи
         self.active_tasks_count = max(0, self.active_tasks_count - 1)
 
         # Вычисляем время выполнения до ошибки
@@ -161,7 +158,7 @@ class WorkerMetricsCollector:
         )
 
     def on_task_success(self, task_name: str, result: Any):
-        """Успешное выполнение задачи"""
+        # Успех задачи
         logger.debug(
             f"✅ Успешное выполнение задачи {task_name}",
             extra={
@@ -172,7 +169,7 @@ class WorkerMetricsCollector:
         )
 
     def on_worker_ready(self, sender):
-        """Воркер готов к работе"""
+        # Воркер готов
         worker_hostname = getattr(sender, 'hostname', 'unknown')
         logger.info(
             f"🟢 Worker {worker_hostname} готов к работе",
@@ -183,7 +180,7 @@ class WorkerMetricsCollector:
         )
 
     def on_worker_shutdown(self, sender):
-        """Остановка воркера"""
+        # Остановка воркера
         worker_hostname = getattr(sender, 'hostname', 'unknown')
         logger.info(
             f"🔴 Worker {worker_hostname} завершает работу",
@@ -195,9 +192,7 @@ class WorkerMetricsCollector:
 
 
 def track_task_metrics(task_name: str = None):
-    """
-    Декоратор для автоматического отслеживания метрик задач
-    """
+    # Декоратор отслеживания метрик задач
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -264,9 +259,7 @@ def track_task_metrics(task_name: str = None):
 
 
 def setup_worker_monitoring(celery_app: Celery):
-    """
-    Настройка мониторинга для Celery приложения
-    """
+    # Настройка мониторинга Celery
     # Создаем коллектор метрик
     metrics_collector = WorkerMetricsCollector()
 
@@ -283,9 +276,7 @@ def setup_worker_monitoring(celery_app: Celery):
 
 # Создаем HTTP сервер для метрик Worker
 def create_worker_metrics_server(port: int = 8002):
-    """
-    Создание HTTP сервера для экспорта метрик Worker
-    """
+    # HTTP сервер метрик Worker
     from prometheus_client import start_http_server, generate_latest
     from src.utils.metrics import get_all_metrics
 
@@ -298,9 +289,7 @@ def create_worker_metrics_server(port: int = 8002):
 
 
 def get_worker_metrics_endpoint():
-    """
-    Endpoint для получения метрик Worker
-    """
+    # Flask endpoint для метрик
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     from flask import Flask, Response
 
@@ -308,7 +297,7 @@ def get_worker_metrics_endpoint():
 
     @app.route('/metrics')
     def metrics():
-        """Endpoint для Prometheus метрик"""
+    # Prometheus метрики
         try:
             metrics_data = generate_latest()
             return Response(metrics_data, mimetype=CONTENT_TYPE_LATEST)
@@ -318,7 +307,7 @@ def get_worker_metrics_endpoint():
 
     @app.route('/health')
     def health():
-        """Health check для Worker"""
+        # Health check
         return {
             "status": "healthy",
             "timestamp": time.time(),
@@ -332,7 +321,7 @@ def get_worker_metrics_endpoint():
 worker_metrics_collector = None
 
 def get_worker_metrics_collector() -> WorkerMetricsCollector:
-    """Получить глобальный коллектор метрик Worker"""
+    # Получить глобальный коллектор
     global worker_metrics_collector
     if worker_metrics_collector is None:
         worker_metrics_collector = WorkerMetricsCollector()

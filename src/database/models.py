@@ -1,7 +1,4 @@
-"""
-SQLAlchemy модели для DiagMod
-Модели базы данных для токовой диагностики двигателей
-"""
+# Модели БД (SQLAlchemy) для токовой диагностики
 
 from datetime import datetime
 from typing import Optional
@@ -89,8 +86,7 @@ class UserRole(PyEnum):
     VIEWER = "viewer"
 
 
-class TimestampMixin:
-    """Миксин для добавления временных меток"""
+class TimestampMixin:  # Временные метки
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -104,8 +100,7 @@ class TimestampMixin:
     )
 
 
-class User(Base, TimestampMixin):
-    """Пользователи системы"""
+class User(Base, TimestampMixin):  # Пользователи
     __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -118,8 +113,7 @@ class User(Base, TimestampMixin):
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
-class Equipment(Base, TimestampMixin):
-    """Оборудование (двигатели, насосы и т.д.)"""
+class Equipment(Base, TimestampMixin):  # Оборудование
     __tablename__ = "equipment"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -142,8 +136,7 @@ class Equipment(Base, TimestampMixin):
     raw_signals = relationship("RawSignal", back_populates="equipment")
 
 
-class DefectType(Base):
-    """Типы дефектов"""
+class DefectType(Base):  # Типы дефектов
     __tablename__ = "defect_types"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -170,8 +163,7 @@ class ProcessingStatus(PyEnum):
     FAILED = "failed"
 
 
-class RawSignal(Base, TimestampMixin):
-    """Сырые токовые сигналы"""
+class RawSignal(Base, TimestampMixin):  # Сырые сигналы
     __tablename__ = "raw_signals"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -218,8 +210,7 @@ class RawSignal(Base, TimestampMixin):
     )
 
 
-class Feature(Base, TimestampMixin):
-    """Извлеченные признаки"""
+class Feature(Base, TimestampMixin):  # Признаки
     __tablename__ = "features"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -290,8 +281,7 @@ class Feature(Base, TimestampMixin):
 ## ProcessingStatus уже определён на верхнем уровне
 
 
-class Prediction(Base, TimestampMixin):
-    """Прогнозы и детекция аномалий"""
+class Prediction(Base, TimestampMixin):  # Прогнозы/аномалии
     __tablename__ = "predictions"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -339,8 +329,7 @@ class Prediction(Base, TimestampMixin):
 
 # Дополнительные модели для логирования и аудита
 
-class SystemLog(Base):
-    """Системные логи"""
+class SystemLog(Base):  # Системные логи
     __tablename__ = "system_logs"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
@@ -367,8 +356,7 @@ class SystemLog(Base):
     )
 
 
-class UserSession(Base):
-    """Пользовательские сессии"""
+class UserSession(Base):  # Сессии пользователей
     __tablename__ = "user_sessions"
 
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)

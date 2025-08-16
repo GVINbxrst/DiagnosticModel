@@ -1,7 +1,4 @@
-"""
-Валидатор данных для CSV загрузчика
-Проверка корректности токовых сигналов и их характеристик
-"""
+# Валидатор CSV токовых сигналов
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
@@ -13,8 +10,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-class ValidationSeverity(Enum):
-    """Уровень критичности валидации"""
+class ValidationSeverity(Enum):  # Уровень критичности
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
@@ -22,20 +18,18 @@ class ValidationSeverity(Enum):
 
 
 @dataclass
-class ValidationResult:
-    """Результат валидации"""
+class ValidationResult:  # Результат валидации
     severity: ValidationSeverity
     message: str
     details: Optional[Dict] = None
 
 
-class DataValidator:
-    """Валидатор данных токовых сигналов"""
+class DataValidator:  # Основной валидатор
 
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
 
-        # Пороги для валидации
+    # Пороговые значения
         self.max_current_amplitude = 1000.0  # Максимальная амплитуда тока (А)
         self.min_sample_rate = 1000  # Минимальная частота дискретизации (Гц)
         self.max_sample_rate = 100000  # Максимальная частота дискретизации (Гц)
@@ -48,23 +42,13 @@ class DataValidator:
         sample_rate: int,
         filename: str = "unknown"
     ) -> List[ValidationResult]:
-        """
-        Валидировать данные из CSV файла
-
-        Args:
-            phase_data: Данные по фазам {'R': [...], 'S': [...], 'T': [...]}
-            sample_rate: Частота дискретизации
-            filename: Имя файла для логирования
-
-        Returns:
-            Список результатов валидации
-        """
+    # Валидация набора фаз
         results = []
 
-        # Проверяем частоту дискретизации
+    # Частота дискретизации
         results.extend(self._validate_sample_rate(sample_rate))
 
-        # Проверяем каждую фазу
+    # Проверка фаз
         for phase_name, values in phase_data.items():
             if values:  # Проверяем только если есть данные
                 phase_results = self._validate_phase_data(
@@ -72,10 +56,10 @@ class DataValidator:
                 )
                 results.extend(phase_results)
 
-        # Проверяем согласованность фаз
+    # Согласованность фаз
         results.extend(self._validate_phase_consistency(phase_data))
 
-        # Логируем результаты валидации
+    # Лог результатов
         self._log_validation_results(results, filename)
 
         return results
@@ -108,7 +92,7 @@ class DataValidator:
         """Валидировать данные одной фазы"""
         results = []
 
-        # Проверяем длину сигнала (адаптивно: очень короткие тестовые сигналы <=10 не блокируют пайплайн)
+    # Длина сигнала (<=10 умеренно короткий — WARNING)
         if len(phase_values) < self.min_signal_length:
             severity = ValidationSeverity.ERROR
             if len(phase_values) >= 3 and len(phase_values) <= 10:
@@ -120,7 +104,7 @@ class DataValidator:
                 details={"phase": phase_name, "length": len(phase_values), "min_required": self.min_signal_length, "softened": severity == ValidationSeverity.WARNING}
             ))
 
-        # Проверяем долю NaN значений
+    # Доля NaN
         nan_count = np.sum(np.isnan(phase_values))
         nan_ratio = nan_count / len(phase_values)
 
@@ -137,7 +121,7 @@ class DataValidator:
                 details={"phase": phase_name, "nan_ratio": nan_ratio}
             ))
 
-        # Проверяем амплитуды (только для не-NaN значений)
+    # Амплитуды (по валидным значениям)
         valid_values = phase_values[~np.isnan(phase_values)]
 
         if len(valid_values) > 0:
@@ -150,7 +134,7 @@ class DataValidator:
                     details={"phase": phase_name, "max_amplitude": max_abs_value}
                 ))
 
-            # Проверяем на постоянную составляющую
+            # Проверка постоянной составляющей
             mean_value = np.mean(valid_values)
             std_value = np.std(valid_values)
 
@@ -170,14 +154,14 @@ class DataValidator:
         """Проверить согласованность между фазами"""
         results = []
 
-        # Получаем длины фаз
+    # Длины фаз
         phase_lengths = {}
         for phase_name, values in phase_data.items():
             if values:
                 phase_lengths[phase_name] = len(values)
 
         if len(phase_lengths) > 1:
-            # Проверяем, что все фазы одинаковой длины
+            # Сравнение длин
             lengths = list(phase_lengths.values())
             if len(set(lengths)) > 1:
                 results.append(ValidationResult(
@@ -186,7 +170,7 @@ class DataValidator:
                     details={"phase_lengths": phase_lengths}
                 ))
 
-        # Проверяем наличие хотя бы одной фазы с данными
+    # Наличие хотя бы одной непустой фазы
         has_data = any(values for values in phase_data.values())
         if not has_data:
             results.append(ValidationResult(

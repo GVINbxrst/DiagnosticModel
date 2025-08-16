@@ -1,13 +1,4 @@
-"""Утилиты централизованной (де)сериализации числовых массивов.
-
-Контракт:
-- Храним массивы float32 в БД как gzip (level=6) сжатые сырые bytes (little-endian
-  стандартный порядок numpy.tobytes()).
-- Пустой или None -> None (ничего не сохраняем).
-
-Использование только через эти функции – прямые обращения к gzip / np.frombuffer
-для фазовых сигналов запрещены.
-"""
+# (Де)сериализация float32 массивов в gzip bytes (центр. утилиты)
 from __future__ import annotations
 
 import gzip
@@ -17,14 +8,7 @@ import numpy as np
 
 
 def dump_float32_array(arr: Optional[np.ndarray]) -> Optional[bytes]:
-    """Сжать numpy массив в gzip bytes.
-
-    Args:
-        arr: Массив (любой dtype) или None.
-
-    Returns:
-        gzip bytes или None если нет данных.
-    """
+    # Сжать numpy массив в gzip bytes
     if arr is None:
         return None
     if not isinstance(arr, np.ndarray):
@@ -35,14 +19,7 @@ def dump_float32_array(arr: Optional[np.ndarray]) -> Optional[bytes]:
 
 
 def load_float32_array(b: Optional[bytes]) -> Optional[np.ndarray]:
-    """Распаковать gzip bytes в numpy float32.
-
-    Args:
-        b: gzip bytes или None.
-
-    Returns:
-        Массив float32 или None если вход пуст.
-    """
+    # Распаковать gzip bytes в float32 массив
     if not b:
         return None
     data = gzip.decompress(b)

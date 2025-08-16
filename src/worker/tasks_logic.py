@@ -1,4 +1,4 @@
-"""Логика Celery задач (перенос из старого tasks.py)."""
+# Логика Celery задач (перенос из старого tasks.py)
 from __future__ import annotations
 
 import asyncio

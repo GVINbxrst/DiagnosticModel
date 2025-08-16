@@ -1,13 +1,4 @@
-"""
-CSV Loader для токовых сигналов асинхронных двигателей
-
-Этот модуль обрабатывает большие CSV файлы с токовыми данными трех фаз:
-- Читает файлы с одной колонкой данных
-- Парсит заголовок вида "current_R,current_S,current_T"
-- Обрабатывает пропущенные значения (NaN)
-- Загружает данные пачками в PostgreSQL с gzip сжатием
-- Логирует весь процесс обработки
-"""
+# CSV Loader токовых сигналов (одноколонный формат R,S,T)
 
 import asyncio
 import csv
@@ -53,22 +44,15 @@ PHASE_NAMES = ['R', 'S', 'T']
 EXPECTED_HEADER_PATTERN = ['current_R', 'current_S', 'current_T']
 
 
-class CSVLoaderError(Exception):
-    """Базовое исключение для CSV Loader"""
+class CSVLoaderError(Exception):  # Базовое исключение
     pass
 
 
-class InvalidCSVFormatError(CSVLoaderError):
-    """Исключение для некорректного формата CSV"""
+class InvalidCSVFormatError(CSVLoaderError):  # Некорректный формат
     pass
 
 
-class CSVProcessingStats:
-    """Статистика обработки CSV файла.
-
-    Исправлена проблема с потенциально повреждённой индентацией: полностью
-    переопределён __init__ без смешения табов и пробелов.
-    """
+class CSVProcessingStats:  # Статистика обработки
 
     def __init__(self) -> None:  # noqa: D401
         # Счётчики строк
@@ -100,7 +84,7 @@ class CSVProcessingStats:
         samples_count: int = 0,
         phases_present: Optional[Dict[str, bool]] = None,
     ):
-        """Добавить статистику обработанной пачки"""
+    # Добавить статистику пачки
         try:
             bs = int(batch_size)
         except Exception:
@@ -118,8 +102,7 @@ class CSVProcessingStats:
         for phase, count in nan_counts.items():
             self.nan_values[phase] += count
 
-    def finish(self):
-        """Завершить подсчет статистики"""
+    def finish(self):  # Завершить подсчет
         self.end_time = datetime.now(UTC)
         # Определяем статус фаз: если вся фаза пустая (все NaN) -> missing
         for p in ['R', 'S', 'T']:
@@ -129,20 +112,17 @@ class CSVProcessingStats:
                 self.phase_status[p] = 'ok'
 
     @property
-    def processing_time(self) -> float:
-        """Время обработки в секундах"""
+    def processing_time(self) -> float:  # Время обработки (сек)
         if self.end_time:
             return (self.end_time - self.start_time).total_seconds()
         return (datetime.now(UTC) - self.start_time).total_seconds()
 
     @property
-    def rows_per_second(self) -> float:
-        """Скорость обработки строк в секунду"""
+    def rows_per_second(self) -> float:  # Строк/сек
         time_elapsed = self.processing_time
         return self.processed_rows / time_elapsed if time_elapsed > 0 else 0
 
-    def to_dict(self) -> Dict:
-        """Конвертировать статистику в словарь"""
+    def to_dict(self) -> Dict:  # В словарь
         return {
             'total_rows': self.total_rows,
             'processed_rows': self.processed_rows,
@@ -182,15 +162,7 @@ def decompress_float32_array(b: bytes):  # type: ignore
 
 
 def calculate_file_hash(file_path: Path) -> str:
-    """
-    Вычислить SHA256 хеш файла для дедупликации
-
-    Args:
-        file_path: Путь к файлу
-
-    Returns:
-        SHA256 хеш в виде строки
-    """
+    # SHA256 хеш файла (дедупликация)
     hash_sha256 = hashlib.sha256()
 
     with open(file_path, 'rb') as f:
@@ -202,18 +174,7 @@ def calculate_file_hash(file_path: Path) -> str:
 
 
 def parse_csv_header(header_line: str) -> List[str]:
-    """
-    Парсить заголовок CSV файла
-
-    Args:
-        header_line: Первая строка файла
-
-    Returns:
-        Список названий фаз
-
-    Raises:
-        InvalidCSVFormatError: Если формат заголовка некорректный
-    """
+    # Парсинг заголовка CSV (3 фазы)
     # Убираем лишние пробелы и разбиваем по запятым
     phases = [phase.strip() for phase in header_line.strip().split(',')]
 
@@ -235,16 +196,7 @@ def parse_csv_header(header_line: str) -> List[str]:
 
 
 def parse_csv_row(row_data: str, phase_count: int = 3) -> Tuple[List[float], List[bool]]:
-    """
-    Парсить строку данных CSV
-
-    Args:
-        row_data: Строка с данными фаз
-        phase_count: Количество ожидаемых фаз
-
-    Returns:
-        Кортеж (значения фаз, маска NaN)
-    """
+    # Парсинг строки CSV
     # Разбиваем строку по запятым
     values_str = [val.strip() for val in row_data.split(',')]
 
@@ -278,16 +230,7 @@ async def find_equipment_by_filename(
     session: AsyncSession,
     filename: str
 ) -> Optional[Equipment]:
-    """
-    Найти оборудование по имени файла
-
-    Args:
-        session: Сессия базы данных
-        filename: Имя файла
-
-    Returns:
-        Объект Equipment или None
-    """
+    # Найти оборудование по имени файла
     from sqlalchemy import select
 
     # Пытаемся извлечь ID оборудования из имени файла
@@ -342,7 +285,7 @@ async def find_equipment_by_filename(
 
 
 class CSVLoader:
-    """Загрузчик CSV файлов с токовыми сигналами"""
+    # Загрузчик CSV сигналов
 
     def __init__(self, batch_size: int = BATCH_SIZE):
         self.batch_size = batch_size
@@ -356,18 +299,7 @@ class CSVLoader:
         recorded_at: Optional[datetime] = None,
         metadata: Optional[Dict] = None
     ) -> CSVProcessingStats:
-        """
-        Загрузить CSV файл в базу данных
-
-        Args:
-            file_path: Путь к CSV файлу
-            equipment_id: UUID оборудования (если None, определяется автоматически)
-            sample_rate: Частота дискретизации в Гц
-            recorded_at: Время записи (если None, используется время модификации файла)
-
-        Returns:
-            Статистика обработки
-        """
+    # Загрузить CSV файл в БД
         file_path = Path(file_path)
         stats = CSVProcessingStats()
 
@@ -560,12 +492,7 @@ class CSVLoader:
         session: AsyncSession,
         metadata: Optional[Dict] = None,
     ) -> AsyncGenerator[Dict, None]:
-        """
-        Обработать CSV файл по пачкам
-
-        Yields:
-            Словарь со статистикой обработанной пачки
-        """
+        # Итеративная обработка файла по пачкам
         with open(file_path, 'r', encoding='utf-8') as csvfile:
             reader = csv.reader(csvfile)
 
@@ -693,18 +620,7 @@ class CSVLoader:
         session: AsyncSession,
         metadata: Optional[Dict] = None,
     ) -> Tuple[Optional[UUID], int, Dict[str, bool]]:
-        """
-        Сохранить пачку данных в базу данных
-
-        Args:
-            batch_data: Данные пачки по фазам
-            equipment_id: UUID оборудования
-            sample_rate: Частота дискретизации
-            recorded_at: Время записи
-            file_hash: Хеш файла
-            file_name: Имя файла
-            session: Сессия базы данных
-        """
+        # Сохранить пачку данных
     # Конвертируем в numpy массивы
         phase_arrays = {}
         samples_count = 0
@@ -778,18 +694,7 @@ async def load_csv_files_from_directory(
     equipment_id: Optional[UUID] = None,
     sample_rate: int = DEFAULT_SAMPLE_RATE
 ) -> Dict[str, CSVProcessingStats]:
-    """
-    Загрузить все CSV файлы из директории
-
-    Args:
-        directory_path: Путь к директории
-        pattern: Паттерн имен файлов
-        equipment_id: UUID оборудования
-        sample_rate: Частота дискретизации
-
-    Returns:
-        Словарь со статистикой по каждому файлу
-    """
+    # Загрузить все CSV из директории
     directory_path = Path(directory_path)
     loader = CSVLoader()
     results = {}

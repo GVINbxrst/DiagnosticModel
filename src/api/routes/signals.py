@@ -1,6 +1,4 @@
-"""
-Роутер для получения сигналов по фазам для визуализации
-"""
+# Роутер сигналов (фазы для визуализации)
 
 import time
 from typing import List, Optional
@@ -36,7 +34,7 @@ async def get_signal_data(
     current_user: UserInfo = Depends(require_any_role),
     session: AsyncSession = Depends(db_session)
 ):
-    """Получение данных одного сигнала. Простая версия: берём AsyncSession напрямую через db_session."""
+    # Получение данных одного сигнала (через db_session)
     result = await session.execute(select(RawSignal).where(RawSignal.id == raw_id))
     raw_signal = result.scalar_one_or_none()
     if not raw_signal:
@@ -95,7 +93,7 @@ async def list_signals(
     page_size: int = Query(20, ge=1, le=100, description="Размер страницы"),
     session: AsyncSession = Depends(db_session)
 ):
-    """Получение списка сигналов с фильтрацией и пагинацией"""
+    # Получение списка сигналов (фильтры, пагинация)
 
     # Прямая проверка авторизации для избежания 422 при отсутствии токена
     auth_header = request.headers.get('authorization')

@@ -1,7 +1,5 @@
 from src.database.models import Equipment, RawSignal, ProcessingStatus
-"""
-Роутер для загрузки CSV файлов с токовыми сигналами
-"""
+# Роутер загрузки CSV токовых сигналов
 
 import os
 import tempfile
@@ -48,27 +46,18 @@ async def upload_csv_file(
                 current_user=current_user,
                 session=real_session  # type: ignore
             )
-    """
-    Загрузка CSV файла с токовыми сигналами
-
-    Принимает CSV файл в формате:
-    - Первая строка: заголовок вида `current_R,current_S,current_T`
-    - Далее: строки значений трех фаз через запятую
-    - Возможны пустые значения для фаз S и T
-
-    После загрузки автоматически запускается задача извлечения признаков.
-    """
+    # Загрузка CSV: заголовок current_R,current_S,current_T; пустые значения допустимы
 
     start_time = time.time()
 
-    # Валидация файла
+    # Проверка расширения файла
     if not file.filename.endswith('.csv'):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Поддерживаются только CSV файлы"
         )
 
-    # Проверка размера файла (максимум 500MB)
+    # Проверка размера (<=500MB)
     file_size = 0
     if hasattr(file.file, 'seek') and hasattr(file.file, 'tell'):
         current_pos = file.file.tell()
@@ -81,7 +70,7 @@ async def upload_csv_file(
                 detail="Размер файла превышает 500MB"
             )
 
-    # Проверка equipment_id (если есть)
+    # Проверка equipment_id
     target_equipment_id = None
     if equipment_id:
         try:
@@ -94,7 +83,7 @@ async def upload_csv_file(
         except Exception:
             raise HTTPException(status_code=422, detail="Некорректный equipment_id")
 
-    # Сохраняем файл во временный файл
+    # Сохраняем во временный файл
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
             contents = await file.read()
@@ -104,7 +93,7 @@ async def upload_csv_file(
         logger.error(f"Ошибка сохранения файла: {e}")
         raise HTTPException(status_code=500, detail="Ошибка сохранения файла")
 
-    # Проверяем заголовок CSV (важно: различаем 422 и общие I/O ошибки)
+    # Проверка заголовка CSV (422 при несоответствии)
     try:
         with open(tmp_path, 'r', encoding='utf-8') as f:
             header = f.readline().strip()
@@ -122,7 +111,7 @@ async def upload_csv_file(
             os.unlink(tmp_path)
         raise HTTPException(status_code=500, detail="Ошибка чтения файла")
 
-    # Загружаем CSV через CSVLoader
+    # Загрузка CSV через CSVLoader
     try:
         loader = CSVLoader()
         # Передаем расширенные метаданные
@@ -141,13 +130,13 @@ async def upload_csv_file(
         os.unlink(tmp_path)
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        # Fallback: если оборудование не найдено – создаём минимальное оборудование и повторяем один раз
+    # Fallback: создаём минимальное оборудование при отсутствии
         from src.data_processing.csv_loader import CSVLoaderError
         if 'Не удалось определить оборудование' in str(e) or isinstance(e, CSVLoaderError):
             try:
                 from src.database.models import Equipment, EquipmentType, EquipmentStatus
                 from sqlalchemy import select
-                # Проверим, есть ли хотя бы одно оборудование; если нет – создадим
+                # Если нет оборудования — создаём
                 existing = await session.execute(select(Equipment).limit(1))
                 if not existing.scalar_one_or_none():
                     import uuid
@@ -169,7 +158,7 @@ async def upload_csv_file(
                     target_equipment_id_local = new_eq.id
                 else:
                     target_equipment_id_local = existing.scalar_one().id  # type: ignore
-                # Повторная попытка
+                    # Повторная попытка загрузки
                 stats_or_id = await loader.load_csv_file(
                     tmp_path,
                     equipment_id=target_equipment_id_local,
@@ -195,7 +184,7 @@ async def upload_csv_file(
         # прямому вызову пайплайна в eager режиме. Удалим позже после запуска задачи.
         pass
 
-    # Ставим задачу Celery (новая сигнатура: raw_id + путь к временному файлу)
+    # Постановка Celery-задачи (raw_id + путь)
     try:
         raw_id_any = getattr(stats_or_id, 'raw_signal_id', None) or getattr(stats_or_id, 'raw_signal_ids', [None])[0] or stats_or_id
         raw_id = UUID(str(raw_id_any))
@@ -211,7 +200,7 @@ async def upload_csv_file(
         logger.error(f"Ошибка постановки задачи Celery: {e}")
         raise HTTPException(status_code=500, detail="Ошибка постановки задачи Celery")
     finally:
-        # Теперь можно удалить временный файл
+    # Удаляем временный файл
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
@@ -222,9 +211,7 @@ async def upload_csv_file(
 
 @router.get("/upload")
 async def upload_get_guard():
-    """Явный GET эндпоинт для /upload – тесты обращаются GET к защищённым ресурсам.
-    Возвращаем 401 чтобы соответствовать ожиданиям списка защищённых эндпоинтов.
-    """
+    # GET /upload всегда 401 (маркер защищённого ресурса для тестов)
     raise HTTPException(status_code=401, detail="Требуется авторизация")
 
 
@@ -233,7 +220,7 @@ async def _create_equipment_from_filename(
     session: AsyncSession,
     user_id: UUID
 ) -> UUID:
-    """Создание нового оборудования на основе имени файла"""
+    # Создание оборудования на основе имени файла
 
     # Извлекаем имя без расширения
     base_name = os.path.splitext(filename)[0]
@@ -269,7 +256,7 @@ async def _create_equipment_from_filename(
 
 @router.get("/upload/status/{task_id}")
 async def get_upload_status(task_id: str):
-    """Получение статуса задачи загрузки"""
+    # Получение статуса задачи загрузки
 
     from celery.result import AsyncResult
     from src.worker.config import celery_app

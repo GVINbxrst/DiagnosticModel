@@ -1,12 +1,4 @@
-"""
-Модуль обучения моделей аномалий для диагностики двигателей
-
-Этот модуль реализует несколько подходов к обнаружению аномалий:
-- Isolation Forest для выявления выбросов
-- DBSCAN для кластеризации и обнаружения аномальных паттернов
-- PCA и t-SNE для визуализации данных
-- Анализ важности признаков для интерпретации результатов
-"""
+# Обучение моделей аномалий (IsolationForest, DBSCAN, PCA, анализ признаков)
 
 import json
 import pickle
@@ -44,11 +36,7 @@ DEFAULT_RANDOM_STATE = 42
 MIN_SAMPLES_FOR_TRAINING = 100
 
 def load_latest_models() -> Dict[str, object]:
-    """Загрузка последней IsolationForest модели (минимально для worker.tasks).
-
-    Ожидает manifest.json в models/anomaly. Возвращает словарь с ключами
-    'isolation_forest' и 'preprocessor' (scaler) если найдено, иначе пустой dict.
-    """
+    # Загрузить последнюю IsolationForest (manifest models/anomaly)
     model_dir = settings.models_path / 'anomaly'
     manifest_path = model_dir / 'manifest.json'
     if not manifest_path.exists():
@@ -85,29 +73,18 @@ def load_latest_models() -> Dict[str, object]:
 
 
 class AnomalyModelError(Exception):
-    """Базовое исключение для моделей аномалий"""
+    # Базовое исключение моделей аномалий
     pass
 
 
 class InsufficientDataError(AnomalyModelError):
-    """Исключение для недостаточного количества данных"""
+    # Недостаточно данных
     pass
 
 
 # === Minimal MVP function required by contract ===
 async def train_isolation_forest(output_path: Optional[str] = None, n_estimators: int = 100) -> Path:
-    """MVP обучение IsolationForest и сохранение модели.
-
-    Шаги (упрощённо):
-      1. Загружаем признаки (таблица Feature) – только статистика RMS/crest/kurt/skew/mean/std/min/max.
-      2. Заполняем NaN медианами; если колонка полностью NaN – отбрасываем.
-      3. Масштабируем StandardScaler.
-      4. Обучаем IsolationForest(random_state=42, n_estimators=n_estimators).
-      5. Сохраняем модель и scaler в models/anomaly/isolation_forest_v1.pkl (joblib).
-      6. Обновляем/создаём models/manifest.json (append/update entry).
-
-    Возвращает путь к pkl файлу. Без сложной стратификации и визуализаций.
-    """
+    # MVP обучение IsolationForest и сохранение модели (см. шаги в коде)
     model_dir = Path(output_path) if output_path else (settings.models_path / 'anomaly')
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -181,7 +158,7 @@ async def train_isolation_forest(output_path: Optional[str] = None, n_estimators
 
 
 class FeaturePreprocessor:
-    """Предобработчик признаков для ML моделей"""
+    # Предобработка признаков
 
     def __init__(self):
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
@@ -195,17 +172,7 @@ class FeaturePreprocessor:
         feature_selection_method: str = 'variance',
         variance_threshold: float = 0.01
     ) -> Tuple[np.ndarray, List[str]]:
-        """
-        Подготовить признаки для обучения ML моделей
-
-        Args:
-            features_df: DataFrame с признаками
-            feature_selection_method: Метод отбора признаков
-            variance_threshold: Порог дисперсии для отбора признаков
-
-        Returns:
-            Кортеж (обработанные признаки, список названий признаков)
-        """
+    # Подготовка признаков для обучения
     # Замечание: первоначально проверка MIN_SAMPLES выполнялась до базовой валидации,
     # что приводило к выбросу InsufficientDataError вместо ожидаемого тестом ValueError,
     # когда отсутствуют нужные признаки. Сначала определим доступные признаки, затем проверим размер.
@@ -259,7 +226,7 @@ class FeaturePreprocessor:
         return X_scaled, selected_features
 
     def _handle_missing_values(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Обработать пропущенные значения"""
+        # Обработка пропусков
         # Заполняем NaN медианными значениями
         X_filled = X.fillna(X.median())
 
@@ -277,7 +244,7 @@ class FeaturePreprocessor:
         X: pd.DataFrame,
         threshold: float
     ) -> Tuple[pd.DataFrame, List[str]]:
-        """Отбор признаков по дисперсии"""
+        # Отбор по дисперсии
         # Вычисляем дисперсию каждого признака
         variances = X.var()
 
@@ -299,7 +266,7 @@ class FeaturePreprocessor:
         return selected_X, high_variance_features
 
     def _scale_features(self, X: pd.DataFrame) -> np.ndarray:
-        """Нормализация признаков"""
+        # Нормализация
         # Используем RobustScaler для устойчивости к выбросам
         self.feature_scaler = RobustScaler()
         X_scaled = self.feature_scaler.fit_transform(X)
@@ -307,7 +274,7 @@ class FeaturePreprocessor:
         return X_scaled
 
     def transform_features(self, features_df: pd.DataFrame) -> np.ndarray:
-        """Применить обученную предобработку к новым данным"""
+        # Трансформация новых данных
         if self.feature_scaler is None or self.selected_features is None:
             raise ValueError("Препроцессор не обучен")
 
@@ -324,7 +291,7 @@ class FeaturePreprocessor:
 
 
 class AnomalyDetectionModels:
-    """Набор моделей для обнаружения аномалий"""
+    # Набор моделей аномалий
 
     def __init__(self, random_state: int = DEFAULT_RANDOM_STATE):
         self.random_state = random_state
@@ -346,17 +313,7 @@ class AnomalyDetectionModels:
         contamination: float = DEFAULT_CONTAMINATION,
         n_estimators: int = 100
     ) -> np.ndarray:
-        """
-        Обучить модель Isolation Forest
-
-        Args:
-            X: Матрица признаков
-            contamination: Ожидаемая доля аномалий
-            n_estimators: Количество деревьев
-
-        Returns:
-            Предсказания (-1 для аномалий, 1 для нормальных)
-        """
+        # Обучить IsolationForest и вернуть предсказания (-1/1)
         self.logger.info(f"Обучение Isolation Forest (contamination={contamination})")
 
         self.isolation_forest = IsolationForest(
@@ -387,17 +344,7 @@ class AnomalyDetectionModels:
         eps: float = 0.5,
         min_samples: int = 5
     ) -> np.ndarray:
-        """
-        Обучить модель DBSCAN
-
-        Args:
-            X: Матрица признаков
-            eps: Радиус соседства
-            min_samples: Минимальное количество образцов в кластере
-
-        Returns:
-            Метки кластеров (-1 для аномалий)
-        """
+        # Обучить DBSCAN, вернуть метки (-1 аномалии)
         self.logger.info(f"Обучение DBSCAN (eps={eps}, min_samples={min_samples})")
 
         self.dbscan = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
@@ -438,16 +385,7 @@ class AnomalyDetectionModels:
         return self.dbscan_labels
 
     def train_pca(self, X: np.ndarray, n_components: int = 2) -> np.ndarray:
-        """
-        Обучить PCA для снижения размерности
-
-        Args:
-            X: Матрица признаков
-            n_components: Количество главных компонент
-
-        Returns:
-            Трансформированные данные
-        """
+        # Обучить PCA и вернуть компоненты
         self.logger.info(f"Обучение PCA (n_components={n_components})")
 
         self.pca = PCA(n_components=n_components, random_state=self.random_state)
@@ -465,15 +403,7 @@ class AnomalyDetectionModels:
         return self.pca_components
 
     def get_feature_importance_isolation_forest(self, feature_names: List[str]) -> Dict[str, float]:
-        """
-        Вычислить важность признаков для Isolation Forest
-
-        Args:
-            feature_names: Названия признаков
-
-        Returns:
-            Словарь с важностью признаков
-        """
+        # Важность признаков IsolationForest
         if self.isolation_forest is None:
             raise ValueError("Isolation Forest не обучен")
 
@@ -499,15 +429,7 @@ class AnomalyDetectionModels:
         return feature_importance
 
     def get_pca_feature_contribution(self, feature_names: List[str]) -> Dict[str, Dict[str, float]]:
-        """
-        Вычислить вклад каждого признака в главные компоненты PCA
-
-        Args:
-            feature_names: Названия признаков
-
-        Returns:
-            Словарь с вкладом признаков в каждую компоненту
-        """
+        # Вклад признаков в компоненты PCA
         if self.pca is None:
             raise ValueError("PCA не обучен")
 
@@ -525,7 +447,7 @@ class AnomalyDetectionModels:
 
 
 class AnomalyModelTrainer:
-    """Основной класс для обучения моделей аномалий"""
+    # Управление процессом обучения моделей аномалий
 
     def __init__(self, models_path: Optional[Path] = None):
         self.models_path = Path(models_path) if models_path else settings.models_path / "anomaly_detection"
@@ -546,16 +468,7 @@ class AnomalyModelTrainer:
         equipment_ids: Optional[List[str]] = None,
         limit: Optional[int] = None
     ) -> pd.DataFrame:
-        """
-        Загрузить данные для обучения из базы данных
-
-        Args:
-            equipment_ids: Список ID оборудования (если None, загружаем все)
-            limit: Максимальное количество записей
-
-        Returns:
-            DataFrame с признаками
-        """
+    # Загрузить данные признаков из БД
         self.logger.info("Загрузка данных для обучения из базы данных")
 
         async with get_async_session() as session:
@@ -637,17 +550,7 @@ class AnomalyModelTrainer:
         contamination: float = DEFAULT_CONTAMINATION,
         save_visualizations: bool = True
     ) -> Dict:
-        """
-        Обучить все модели аномалий
-
-        Args:
-            equipment_ids: Список ID оборудования
-            contamination: Ожидаемая доля аномалий
-            save_visualizations: Сохранять ли визуализации
-
-        Returns:
-            Словарь с результатами обучения
-        """
+    # Обучить все модели аномалий
         self.logger.info("Начинаем обучение моделей аномалий")
 
         # Загружаем данные
@@ -701,15 +604,7 @@ class AnomalyModelTrainer:
         return results
 
     def analyze_feature_importance(self, top_n: int = 10) -> Dict:
-        """
-        Анализ важности признаков
-
-        Args:
-            top_n: Количество топ признаков для вывода
-
-        Returns:
-            Словарь с анализом важности
-        """
+        # Анализ важности признаков
         analysis = {}
 
         # Важность для Isolation Forest
@@ -753,16 +648,7 @@ class AnomalyModelTrainer:
         return analysis
 
     def create_visualizations(self, X: np.ndarray, pca_components: np.ndarray) -> Dict[str, str]:
-        """
-        Создать визуализации результатов
-
-        Args:
-            X: Исходные признаки
-            pca_components: PCA компоненты
-
-        Returns:
-            Словарь с путями к файлам визуализаций
-        """
+        # Построить визуализации результатов
         viz_dir = self.models_path / "visualizations"
         viz_dir.mkdir(exist_ok=True)
 
@@ -885,12 +771,7 @@ class AnomalyModelTrainer:
         return paths
 
     def save_models(self) -> str:
-        """
-        Сохранить обученные модели
-
-        Returns:
-            Версия модели
-        """
+        # Сохранить модели и вернуть версию
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         version = f"v1.0.0_{timestamp}"
 
@@ -966,17 +847,7 @@ async def train_anomaly_models(
     contamination: float = DEFAULT_CONTAMINATION,
     output_dir: Optional[str] = None
 ) -> Dict:
-    """
-    Обучить модели аномалий
-
-    Args:
-        equipment_ids: Список ID оборудования
-        contamination: Ожидаемая доля аномалий
-        output_dir: Директория для сохранения моделей
-
-    Returns:
-        Результаты обучения
-    """
+    # Обучить модели аномалий (все)
     output_path = Path(output_dir) if output_dir else None
     trainer = AnomalyModelTrainer(models_path=output_path)
 

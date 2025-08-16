@@ -1,6 +1,4 @@
-"""
-Pydantic схемы для API запросов и ответов
-"""
+# Pydantic схемы API
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional, Dict, Any, Union
@@ -9,16 +7,14 @@ from uuid import UUID
 from enum import Enum
 
 
-class UserRole(str, Enum):
-    """Роли пользователей"""
+class UserRole(str, Enum):  # Роли пользователей
     ADMIN = "admin"
     ENGINEER = "engineer"
     OPERATOR = "operator"
     VIEWER = "viewer"
 
 
-class ProcessingStatus(str, Enum):
-    """Статус обработки данных"""
+class ProcessingStatus(str, Enum):  # Статус обработки
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -26,27 +22,23 @@ class ProcessingStatus(str, Enum):
 
 
 # Схемы аутентификации
-class LoginRequest(BaseModel):
-    """Запрос на авторизацию"""
+class LoginRequest(BaseModel):  # Авторизация
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=6)
 
 
-class TokenResponse(BaseModel):
-    """Ответ с токенами"""
+class TokenResponse(BaseModel):  # Ответ с токенами
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
 
 
-class RefreshTokenRequest(BaseModel):
-    """Запрос на обновление токена"""
+class RefreshTokenRequest(BaseModel):  # Обновление токена
     refresh_token: str
 
 
-class UserInfo(BaseModel):
-    """Информация о пользователе"""
+class UserInfo(BaseModel):  # Пользователь
     id: UUID
     username: str
     email: Optional[str]
@@ -60,16 +52,14 @@ class UserInfo(BaseModel):
 
 
 # Схемы загрузки файлов
-class UploadMetadata(BaseModel):
-    """Метаданные для загрузки файла"""
+class UploadMetadata(BaseModel):  # Метаданные загрузки
     equipment_id: Optional[UUID] = Field(None, description="ID оборудования")
     sample_rate: Optional[int] = Field(25600, description="Частота дискретизации (Гц)")
     description: Optional[str] = Field(None, description="Описание файла")
     tags: Optional[List[str]] = Field(default_factory=list, description="Теги")
 
 
-class UploadResponse(BaseModel):
-    """Ответ на загрузку файла"""
+class UploadResponse(BaseModel):  # Ответ загрузки
     success: bool
     message: str
     raw_signal_id: UUID
@@ -83,8 +73,7 @@ class UploadResponse(BaseModel):
 
 
 # Схемы сигналов
-class PhaseData(BaseModel):
-    """Данные одной фазы"""
+class PhaseData(BaseModel):  # Данные фазы
     phase_name: str = Field(..., description="Название фазы (a, b, c)")
     values: List[float] = Field(..., description="Значения сигнала")
     has_data: bool = Field(..., description="Есть ли данные для фазы")
@@ -92,8 +81,7 @@ class PhaseData(BaseModel):
     statistics: Optional[Dict[str, float]] = Field(None, description="Базовая статистика")
 
 
-class SignalResponse(BaseModel):
-    """Ответ с данными сигнала"""
+class SignalResponse(BaseModel):  # Ответ сигнала
     raw_signal_id: UUID
     equipment_id: UUID
     recorded_at: datetime
@@ -104,8 +92,7 @@ class SignalResponse(BaseModel):
     processing_status: ProcessingStatus
 
 
-class SignalListItem(BaseModel):
-    """Элемент списка сигналов"""
+class SignalListItem(BaseModel):  # Элемент списка
     raw_signal_id: UUID
     equipment_id: UUID
     recorded_at: datetime
@@ -115,8 +102,7 @@ class SignalListItem(BaseModel):
     file_name: Optional[str]
 
 
-class SignalListResponse(BaseModel):
-    """Список сигналов"""
+class SignalListResponse(BaseModel):  # Список сигналов
     signals: List[SignalListItem]
     total_count: int
     page: int
@@ -142,8 +128,7 @@ class AnomalyInfo(BaseModel):
     prediction_data: Dict[str, Any]
 
 
-class ForecastInfo(BaseModel):
-    """Информация о прогнозе"""
+class ForecastInfo(BaseModel):  # Информация о прогнозе
     equipment_id: UUID
     forecast_horizon_hours: int
     max_anomaly_probability: float = Field(..., ge=0.0, le=1.0)
@@ -153,8 +138,7 @@ class ForecastInfo(BaseModel):
     forecast_details: Dict[str, Any]
 
 
-class AnomaliesResponse(BaseModel):
-    """Ответ со списком аномалий"""
+class AnomaliesResponse(BaseModel):  # Ответ аномалий
     equipment_id: UUID
     anomalies: List[AnomalyInfo]
     forecast: Optional[ForecastInfo]
@@ -165,8 +149,7 @@ class AnomaliesResponse(BaseModel):
 
 
 # Схемы оборудования
-class EquipmentInfo(BaseModel):
-    """Информация об оборудовании"""
+class EquipmentInfo(BaseModel):  # Оборудование
     id: UUID
     name: str
     equipment_type: str
@@ -178,28 +161,24 @@ class EquipmentInfo(BaseModel):
     health_score: Optional[float] = Field(None, ge=0.0, le=100.0)
 
 
-class EquipmentListResponse(BaseModel):
-    """Список оборудования"""
+class EquipmentListResponse(BaseModel):  # Список оборудования
     equipment: List[EquipmentInfo]
     total_count: int
     active_count: int
 
 
 # Схемы фильтрации и пагинации
-class TimeRangeFilter(BaseModel):
-    """Фильтр по времени"""
+class TimeRangeFilter(BaseModel):  # Фильтр времени
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
 
 
-class PaginationParams(BaseModel):
-    """Параметры пагинации"""
+class PaginationParams(BaseModel):  # Пагинация
     page: int = Field(1, ge=1, description="Номер страницы")
     page_size: int = Field(20, ge=1, le=100, description="Размер страницы")
 
 
-class AnomalyFilter(BaseModel):
-    """Фильтр аномалий"""
+class AnomalyFilter(BaseModel):  # Фильтр аномалий
     time_range: Optional[TimeRangeFilter] = None
     min_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
     severity_levels: Optional[List[str]] = None
@@ -208,8 +187,7 @@ class AnomalyFilter(BaseModel):
 
 
 # Схемы мониторинга
-class HealthResponse(BaseModel):
-    """Ответ о состоянии здоровья системы"""
+class HealthResponse(BaseModel):  # Health статус
     status: str = Field(..., description="healthy или unhealthy")
     message: str
     version: str
@@ -217,8 +195,7 @@ class HealthResponse(BaseModel):
     checks: Optional[Dict[str, Any]] = None
 
 
-class SystemStats(BaseModel):
-    """Системная статистика"""
+class SystemStats(BaseModel):  # Системная статистика
     total_signals: int
     processed_signals: int
     failed_signals: int
@@ -228,15 +205,13 @@ class SystemStats(BaseModel):
     last_update: datetime
 
 
-class MetricsResponse(BaseModel):
-    """Ответ с метриками"""
+class MetricsResponse(BaseModel):  # Метрики
     metrics: Dict[str, Any]
     generated_at: datetime
 
 
 # Схемы ошибок
-class ErrorResponse(BaseModel):
-    """Стандартный ответ об ошибке"""
+class ErrorResponse(BaseModel):  # Ошибка
     error: bool = True
     status_code: int
     message: str
@@ -244,15 +219,13 @@ class ErrorResponse(BaseModel):
     timestamp: float
 
 
-class ValidationErrorDetail(BaseModel):
-    """Детали ош��бки валидации"""
+class ValidationErrorDetail(BaseModel):  # Детали ошибки валидации
     field: str
     message: str
     invalid_value: Any
 
 
-class ValidationErrorResponse(BaseModel):
-    """Ответ с ошибками валидации"""
+class ValidationErrorResponse(BaseModel):  # Ответ ошибок валидации
     error: bool = True
     status_code: int = 422
     message: str = "Ошибка валидации данных"
@@ -261,8 +234,7 @@ class ValidationErrorResponse(BaseModel):
 
 
 # Схемы для задач
-class TaskInfo(BaseModel):
-    """Информация о фоновой задаче"""
+class TaskInfo(BaseModel):  # Фоновая задача
     task_id: str
     task_name: str
     status: str
@@ -273,8 +245,7 @@ class TaskInfo(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-class TaskStatusResponse(BaseModel):
-    """Ответ со статусом задачи"""
+class TaskStatusResponse(BaseModel):  # Статус задачи
     task: TaskInfo
     estimated_completion: Optional[datetime] = None
 

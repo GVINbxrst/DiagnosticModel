@@ -1,4 +1,4 @@
-"""Celery задачи для фоновой обработки данных диагностики двигателей."""
+# Celery задачи фоновой обработки диагностики
 
 import asyncio
 import json
@@ -74,16 +74,7 @@ async def compress_and_store_results(data: Any) -> bytes:
 )
 @_observe_latency('worker_task_duration_seconds', labels={'task_name': 'process_raw'})
 def process_raw(self, raw_id: str, path: str) -> Dict:
-    """Обработка сырого CSV файла по пайплайну (требование Блока 1).
-
-    Steps:
-      1. Обновить статус RawSignal -> PROCESSING
-      2. CSVLoader.load_file(path) -> data / phase_status / stats
-      3. DataValidator.validate(data) -> при CRITICAL => FAILED
-      4. FeatureExtractor.extract(data) -> сохранить признаки
-      5. Пометить RawSignal COMPLETED
-    При любой необработанной ошибке -> FAILED
-    """
+    # Обработка CSV: статус -> загрузка -> валидация -> признаки -> статус
     started = datetime.now(UTC)
     try:
         result = asyncio.run(_process_raw_pipeline_async(raw_id, path))
@@ -98,9 +89,8 @@ def process_raw(self, raw_id: str, path: str) -> Dict:
         raise
 
 
-def _resolve_session_factory():  # pragma: no cover - инфраструктурный слой
-    """Позволяет тестам patch('src.worker.tasks.get_async_session') перехватить фабрику.
-    Если патч есть на уровне пакета, используем его, иначе базовую из connection."""
+def _resolve_session_factory():  # pragma: no cover
+    # Разрешает патчинг get_async_session в тестах
     try:
         import sys
         pkg = sys.modules.get('src.worker.tasks')
@@ -176,7 +166,7 @@ async def _process_raw_async(raw_id: str) -> Dict:
 
 
 async def _update_signal_status(raw_id: str, status: ProcessingStatus, error: Optional[str] = None):
-    """Обновление статуса сырого сигнала (используем select чтобы упростить мок в тестах)."""
+    # Обновление статуса сырого сигнала
     async with _resolve_session_factory()() as session:
         q = select(RawSignal).where(RawSignal.id == UUID(raw_id))
         rs = None
@@ -318,7 +308,7 @@ def _prepare_feature_vector(feature: Feature) -> List[float]:
 
 
 async def load_latest_models_async():
-    """Асинхронная загрузка последних обученных моделей (разрешаем патчинг через пакет)."""
+    # Асинхронная загрузка последних моделей (с патчингом)
     try:
         import sys
         pkg = sys.modules.get('src.worker.tasks')
@@ -389,13 +379,7 @@ async def _forecast_trend_async(equipment_id: str) -> Dict:
 
 ######################## Pipeline (CSV -> Validate -> Features) ########################
 async def _process_raw_pipeline_async(raw_id: str, path: str) -> Dict:
-    """Минимальный пайплайн согласно ТЗ Блок 1.
-    1) status -> PROCESSING
-    2) CSVLoader.load_file(path, raw_id=raw_id)
-    3) DataValidator.validate(...) -> при CRITICAL/ERROR -> FAILED
-    4) FeatureExtractor.process_raw_signal -> признаки
-    5) status -> COMPLETED
-    """
+    # Минимальный пайплайн: статус -> загрузка -> валидация -> признаки -> статус
     await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
     from src.data_processing.csv_loader import CSVLoader
     from src.data_processing.data_validator import DataValidator
@@ -454,7 +438,7 @@ __all__ = [
 ]
 
 def _prepare_feature_vector(feature: Feature) -> List[float]:
-    """Подготовка вектора признаков для ML модели"""
+    # Подготовка вектора признаков
     vector = []
 
     # RMS значения
@@ -497,7 +481,7 @@ def _prepare_feature_vector(feature: Feature) -> List[float]:
 
 
 async def load_latest_models_async():
-    """Асинхронная загрузка последних обученных моделей (разрешаем патчинг через пакет)."""
+    # Асинхронная загрузка моделей (дубль для совместимости)
     try:
         import sys
         pkg = sys.modules.get('src.worker.tasks')
@@ -517,12 +501,7 @@ async def load_latest_models_async():
 @_observe_latency('worker_task_duration_seconds', labels={'task_name':'cleanup_old_data'})
 @celery_app.task(bind=True, base=DatabaseTask)
 def cleanup_old_data(self, days_to_keep: int = 30) -> Dict:
-    """
-    Очистка старых данных и результатов
-
-    Args:
-        days_to_keep: Количество дней для хранения данных
-    """
+    # Очистка старых данных (days_to_keep)
     self.logger.info(f"Начинаем очистку данных старше {days_to_keep} дней")
 
     try:
@@ -536,7 +515,7 @@ def cleanup_old_data(self, days_to_keep: int = 30) -> Dict:
 
 
 async def _cleanup_old_data_async(days_to_keep: int) -> Dict:
-    """Асинхронная очистка старых данных"""
+    # Асинхронная очистка
 
     cutoff_date = datetime.now(UTC) - timedelta(days=days_to_keep)
     deleted_counts = {}
@@ -582,7 +561,7 @@ async def _cleanup_old_data_async(days_to_keep: int) -> Dict:
 @_observe_latency('worker_task_duration_seconds', labels={'task_name':'retrain_models'})
 @celery_app.task(bind=True, base=DatabaseTask)
 def retrain_models(self) -> Dict:
-    """Переобучение моделей на новых данных"""
+    # Переобучение моделей
 
     self.logger.info("Начинаем переобучение моделей")
 
@@ -601,7 +580,7 @@ def retrain_models(self) -> Dict:
 
 
 async def _retrain_models_async() -> Dict:
-    """Асинхронное переобучение моделей"""
+    # Асинхронное переобучение
     from src.ml.train import AnomalyModelTrainer
     trainer = AnomalyModelTrainer()
 
@@ -623,13 +602,13 @@ async def _retrain_models_async() -> Dict:
 
 @worker_ready.connect
 def worker_ready_handler(sender=None, **kwargs):
-    """Обработчик готовности worker"""
+    # Worker готов
     logger.info("Celery worker готов к работе")
 
 
 @worker_shutdown.connect
 def worker_shutdown_handler(sender=None, **kwargs):
-    """Обработчик остановки worker"""
+    # Worker остановка
     logger.info("Celery worker завершает работу")
 
 

@@ -1,7 +1,4 @@
-"""
-Система Prometheus метрик для DiagMod
-Сбор и экспорт метрик для мониторинга производительности и состояния системы
-"""
+# Метрики Prometheus: сбор/экспорт для мониторинга
 
 import time
 from functools import wraps
@@ -46,7 +43,7 @@ def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] 
         metric.observe(value)
 
 def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    """Установить значение gauge по имени метрики."""
+    # Установить значение gauge
     metric = globals().get(name)
     if metric is None:
         logger.warning(f"Метрика {name} не найдена для set_gauge")
@@ -60,15 +57,15 @@ def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
         logger.warning(f"Ошибка при установке gauge {name}: {e}")
 
 def increment(name: str, labels: Optional[Dict[str, str]] = None):
-    """Alias для increment_counter для совместимости с тестами."""
+    # Alias increment_counter (совместимость)
     return increment_counter(name, labels)
 
 def observe(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    """Alias для observe_histogram (совместимость)."""
+    # Alias observe_hist (совместимость)
     return observe_histogram(name, value, labels)
 
 def track_worker_task(task_name: str, status: str, duration: Optional[float] = None):
-    """Утилита-совместимость для учета метрик задач воркера."""
+    # Учёт метрик задач воркера
     try:
         increment_counter('worker_tasks_total', {'task_name': task_name, 'status': status})
         if duration is not None:
@@ -269,7 +266,7 @@ app_info = Info(
 
 
 class MetricsCollector:
-    """Коллектор и точка доступа к системным метрикам."""
+    # Коллектор системных метрик
 
     def __init__(self):
         self.start_time = time.time()
@@ -283,7 +280,7 @@ class MetricsCollector:
         })
 
     def update_system_metrics(self):
-        """Обновить базовые системные метрики (CPU/Memory/Disk)."""
+        # Обновить системные метрики
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
             system_cpu_usage_percent.set(cpu_percent)
@@ -301,7 +298,7 @@ class MetricsCollector:
             logger.debug(f"Не удалось обновить системные метрики: {e}")
 
     def get_metrics(self) -> bytes:
-        """Вернуть все метрики в формате Prometheus."""
+        # Получить все метрики
         return generate_latest(REGISTRY)
 
     # --- Унифицированные утилиты ---

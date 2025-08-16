@@ -1,4 +1,4 @@
-"""Специализированные задачи (перенос для устранения циклических импортов)."""
+# Специализированные задачи (устранение циклических импортов)
 import asyncio
 import inspect
 from datetime import datetime, timedelta, UTC

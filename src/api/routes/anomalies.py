@@ -1,6 +1,4 @@
-"""
-Роутер для получения аномалий по оборудованию
-"""
+# Роутер аномалий по оборудованию
 
 import time
 from datetime import datetime, timedelta, UTC
@@ -112,14 +110,7 @@ async def get_equipment_anomalies(
         raise
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный токен")
-    """
-    Получение списка аномалий для конкретного оборудования
-
-    Возвращает:
-    - Список обнаруженных аномалий с детальной информацией
-    - Последний прогноз для оборудования
-    - Сводную статистику по аномалиям
-    """
+    # Получение списка аномалий: список, последний прогноз, сводка
 
     start_time = time.time()
 
