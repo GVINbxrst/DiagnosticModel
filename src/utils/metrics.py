@@ -135,6 +135,113 @@ anomalies_detected_total = Counter(
     registry=REGISTRY
 )
 
+# Перетренировки и версии моделей
+model_retrain_total = Counter(
+    'model_retrain_total',
+    'Количество запусков переобучения моделей',
+    ['model_group', 'status'],
+    registry=REGISTRY
+)
+
+model_version_gauge = Gauge(
+    'model_version_info',
+    'Текущая активная версия моделей (label version -> 1)',
+    ['model_group', 'version'],
+    registry=REGISTRY
+)
+
+# Качество переобучения аномалий
+anomaly_retrain_score_p98 = Gauge(
+    'anomaly_retrain_score_p98',
+    '98-й перцентиль внутренних score при обучении stream модели',
+    ['model_type'],
+    registry=REGISTRY
+)
+anomaly_retrain_outlier_ratio = Gauge(
+    'anomaly_retrain_outlier_ratio',
+    'Доля точек превысивших новый threshold во время retrain (оценка контаминации)',
+    ['model_type'],
+    registry=REGISTRY
+)
+
+# Кластеризация
+clustering_runs_total = Counter(
+    'clustering_runs_total',
+    'Количество запусков пайплайна кластеризации',
+    ['status'],
+    registry=REGISTRY
+)
+clustering_last_duration_seconds = Gauge(
+    'clustering_last_duration_seconds',
+    'Длительность последнего запуска кластеризации (сек)',
+    registry=REGISTRY
+)
+
+# --- Метрики готовности данных / обучающего датасета ---
+features_with_embedding_total = Gauge(
+    'features_with_embedding_total',
+    'Количество Feature записей с embedding',
+    registry=REGISTRY
+)
+embedding_coverage_ratio = Gauge(
+    'embedding_coverage_ratio',
+    'Доля features с embedding (0..1)',
+    registry=REGISTRY
+)
+clustering_noise_ratio = Gauge(
+    'clustering_noise_ratio',
+    'Доля точек без присвоенного cluster_id (noise)',
+    registry=REGISTRY
+)
+clustering_label_coverage_ratio = Gauge(
+    'clustering_label_coverage_ratio',
+    'Доля кластеров, имеющих назначенную метку дефекта',
+    registry=REGISTRY
+)
+min_cluster_size_labeled = Gauge(
+    'min_cluster_size_labeled',
+    'Минимальный размер среди размеченных кластеров',
+    registry=REGISTRY
+)
+p50_cluster_size = Gauge(
+    'p50_cluster_size',
+    'Медианный размер кластеров',
+    registry=REGISTRY
+)
+p90_cluster_size = Gauge(
+    'p90_cluster_size',
+    '90-й перцентиль размеров кластеров',
+    registry=REGISTRY
+)
+data_recency_seconds = Gauge(
+    'data_recency_seconds',
+    'Сколько секунд прошло с момента последнего window_end Feature',
+    registry=REGISTRY
+)
+clustering_drift_score = Gauge(
+    'clustering_drift_score',
+    'Оценка дрейфа распределения кластеров (Jensen-Shannon divergence 0..1)',
+    registry=REGISTRY
+)
+training_snapshot_timestamp = Gauge(
+    'training_snapshot_timestamp',
+    'Unix-время (UTC) последнего успешного snapshot обучающего датасета',
+    registry=REGISTRY
+)
+
+# CSV ingestion
+csv_ingest_files_total = Counter(
+    'csv_ingest_files_total',
+    'Количество CSV файлов, обработанных лоадером',
+    ['status'],  # success|error
+    registry=REGISTRY
+)
+csv_ingest_rows_total = Counter(
+    'csv_ingest_rows_total',
+    'Суммарное количество строк успешно загруженных CSV',
+    registry=REGISTRY
+)
+
 anomaly_detection_duration_seconds = Histogram(
     'anomaly_detection_duration_seconds',
     'Время выполнения обнаружения аномалий в секундах',
@@ -156,6 +263,13 @@ forecasts_generated_total = Counter(
     'forecasts_generated_total',
     'Общее количество сгенерированных прогнозов',
     ['model_name', 'equipment_id', 'status'],
+    registry=REGISTRY
+)
+
+forecast_tasks_total = Counter(
+    'forecast_tasks_total',
+    'Количество запусков фоновой задачи прогнозирования',
+    ['task', 'status'],
     registry=REGISTRY
 )
 
@@ -218,6 +332,43 @@ worker_task_duration_seconds = Histogram(
 worker_active_tasks = Gauge(
     'worker_active_tasks',
     'Количество активных задач воркера',
+    registry=REGISTRY
+)
+
+# Кеш моделей (hits / misses / store / invalidate)
+model_cache_events_total = Counter(
+    'model_cache_events_total',
+    'События кеша ML моделей',
+    ['model_name', 'event'],  # hit|miss|store|invalidate
+    registry=REGISTRY
+)
+
+# Дедупликация CSV
+csv_duplicates_total = Counter(
+    'csv_duplicates_total',
+    'Количество попыток загрузить уже существующий CSV (по file_hash)',
+    ['equipment_id'],
+    registry=REGISTRY
+)
+csv_duplicate_skipped_total = Counter(
+    'csv_duplicate_skipped_total',
+    'Количество пропущенных CSV из-за дубликата (без повторной обработки)',
+    ['equipment_id'],
+    registry=REGISTRY
+)
+
+# Метрики Feature Store
+feature_store_hit_total = Counter(
+    'feature_store_hit_total',
+    'Количество успешных чтений из Feature Store (без fallback)',
+    ['backend'],
+    registry=REGISTRY
+)
+
+feature_store_miss_total = Counter(
+    'feature_store_miss_total',
+    'Количество промахов Feature Store (fallback либо пустой результат)',
+    ['backend', 'reason'],
     registry=REGISTRY
 )
 

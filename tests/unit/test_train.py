@@ -161,48 +161,9 @@ class TestFeaturePreprocessor:
             preprocessor.prepare_features_for_training(df)
 
 
-@pytest.mark.asyncio
-async def test_mvp_train_isolation_forest(monkeypatch, tmp_path):
-    """MVP тест функции train_isolation_forest: создаём временную таблицу и обучаем модель."""
-    from sqlalchemy import text
-    from src.database.connection import engine
-    from src.ml.train import train_isolation_forest
-    from src.ml import train as train_module
-
-    # Перенастраиваем каталог моделей
-    monkeypatch.setattr(train_module.settings, 'models_path', tmp_path)
-
-    DDL = """
-    CREATE TABLE IF NOT EXISTS feature (
-        id UUID PRIMARY KEY,
-        rms_a DOUBLE PRECISION,
-        crest_a DOUBLE PRECISION,
-        kurt_a DOUBLE PRECISION,
-        skew_a DOUBLE PRECISION,
-        mean_a DOUBLE PRECISION,
-        std_a DOUBLE PRECISION,
-        min_a DOUBLE PRECISION,
-        max_a DOUBLE PRECISION
-    );
-    """
-    async with engine.begin() as conn:
-        await conn.execute(text(DDL))
-        # Вставляем >100 строк (порог MIN_SAMPLES_FOR_TRAINING не используется здесь, но дадим 120)
-        for _ in range(120):
-            await conn.execute(text("INSERT INTO feature (id, rms_a, crest_a, kurt_a, skew_a, mean_a, std_a, min_a, max_a) VALUES (:id,:r,:c,:k,:s,:m,:st,:mn,:mx)"), {
-                'id': str(uuid4()),
-                'r': float(np.random.normal(10,2)),
-                'c': float(np.random.normal(3,0.5)),
-                'k': float(np.random.normal(0,1)),
-                's': float(np.random.normal(0,1)),
-                'm': float(np.random.normal(10,2)),
-                'st': float(abs(np.random.normal(2,0.3))),
-                'mn': float(np.random.normal(5,1)),
-                'mx': float(np.random.normal(15,1)),
-            })
-
-    model_path = await train_isolation_forest(output_path=str(tmp_path))
-    assert model_path.exists()
+@pytest.mark.skip(reason="IsolationForest удалён; тест деактивирован")
+async def test_mvp_train_isolation_forest(monkeypatch, tmp_path):  # pragma: no cover
+    pass
 
 
 class TestAnomalyDetectionModels:
@@ -237,26 +198,9 @@ class TestAnomalyDetectionModels:
 
         return X, y_true
 
-    def test_train_isolation_forest(self, models, sample_data):
-        """Тест обучения Isolation Forest"""
-        X, y_true = sample_data
-
-        predictions = models.train_isolation_forest(X, contamination=0.1)
-
-        # Проверяем, что модель обучена
-        assert models.isolation_forest is not None
-        assert models.isolation_predictions is not None
-
-        # Проверяем размерность предсказаний
-        assert len(predictions) == len(X)
-
-        # Проверяем, что есть аномалии и нормальные точки
-        assert np.any(predictions == -1)  # Есть аномалии
-        assert np.any(predictions == 1)   # Есть нормальные
-
-        # Проверяем примерную долю аномалий
-        anomaly_ratio = np.sum(predictions == -1) / len(predictions)
-        assert 0.05 <= anomaly_ratio <= 0.15  # Около 10% ± 5%
+    @pytest.mark.skip(reason="IsolationForest удалён; тест деактивирован")
+    def test_train_isolation_forest(self, models, sample_data):  # pragma: no cover
+        pass
 
     def test_train_dbscan(self, models, sample_data):
         """Тест обучения DBSCAN"""
@@ -293,24 +237,9 @@ class TestAnomalyDetectionModels:
         total_variance = np.sum(models.pca.explained_variance_ratio_)
         assert total_variance > 0.5  # Минимум 50% дисперсии
 
-    def test_feature_importance_isolation_forest(self, models, sample_data):
-        """Тест вычисления важности признаков для Isolation Forest"""
-        X, y_true = sample_data
-
-        # Обучаем модель
-        models.train_isolation_forest(X)
-
-        # Вычисляем важность признаков
-        feature_names = ['feature_1', 'feature_2', 'feature_3']
-        importance = models.get_feature_importance_isolation_forest(feature_names)
-
-        # Проверяем результат
-        assert len(importance) == len(feature_names)
-        assert all(isinstance(v, (int, float)) for v in importance.values())
-        assert all(v >= 0 for v in importance.values())
-
-        # Проверяем, что сумма важностей равна 1 (нормализация)
-        assert abs(sum(importance.values()) - 1.0) < 1e-6
+    @pytest.mark.skip(reason="IsolationForest удалён; тест деактивирован")
+    def test_feature_importance_isolation_forest(self, models, sample_data):  # pragma: no cover
+        pass
 
     def test_pca_feature_contribution(self, models, sample_data):
         """Тест вычисления вклада признаков в PCA компоненты"""
@@ -437,28 +366,13 @@ class TestAnomalyModelTrainer:
             assert not df['rms_a'].isna().all()
 
     def test_analyze_feature_importance(self, trainer, mock_features_data):
-        """Тест анализа важности признаков"""
-        # Подготавливаем данные
+        """Тест анализа важности признаков (PCA-only после удаления IsolationForest)"""
         trainer.training_data = mock_features_data
         X, feature_names = trainer.preprocessor.prepare_features_for_training(mock_features_data)
         trainer.feature_names = feature_names
-
-        # Обучаем модели
-        trainer.models.train_isolation_forest(X)
         trainer.models.train_pca(X)
-
-        # Анализируем важность
         importance_analysis = trainer.analyze_feature_importance(top_n=5)
-
-        # Проверяем результат
-        assert 'isolation_forest' in importance_analysis
         assert 'pca_contributions' in importance_analysis
-
-        if_analysis = importance_analysis['isolation_forest']
-        assert 'top_features' in if_analysis
-        assert 'all_features' in if_analysis
-        assert len(if_analysis['top_features']) <= 5
-
         pca_analysis = importance_analysis['pca_contributions']
         assert 'PC1' in pca_analysis
         assert 'PC2' in pca_analysis
@@ -470,7 +384,6 @@ class TestAnomalyModelTrainer:
         X, feature_names = trainer.preprocessor.prepare_features_for_training(mock_features_data)
         trainer.feature_names = feature_names
 
-        trainer.models.train_isolation_forest(X)
         trainer.models.train_dbscan(X)
         trainer.models.train_pca(X)
 
@@ -482,7 +395,6 @@ class TestAnomalyModelTrainer:
         assert version_dir.exists()
 
         # Проверяем наличие файлов моделей
-        assert (version_dir / "isolation_forest.pkl").exists()
         assert (version_dir / "dbscan.pkl").exists()
         assert (version_dir / "pca.pkl").exists()
         assert (version_dir / "preprocessor.pkl").exists()
@@ -574,17 +486,9 @@ class TestAnomalyModelTrainerIntegration:
         trainer.feature_names = feature_names
 
         # Обучаем модели
-        if_predictions = trainer.models.train_isolation_forest(X, contamination=0.2)
         dbscan_labels = trainer.models.train_dbscan(X, eps=1.0, min_samples=10)
         pca_components = trainer.models.train_pca(X)
-
-        # Проверяем качество детекции Isolation Forest
-        # Преобразуем предсказания в бинарный формат
-        if_binary = (if_predictions == -1).astype(int)
-
-        # Должно быть найдено разумное количество аномалий
-        anomaly_ratio = np.sum(if_binary) / len(if_binary)
-        assert 0.1 <= anomaly_ratio <= 0.3  # 10-30% аномалий
+    # IsolationForest проверка пропущена (legacy)
 
         # DBSCAN должен найти кластеры
         n_clusters = len(set(dbscan_labels)) - (1 if -1 in dbscan_labels else 0)
@@ -594,16 +498,7 @@ class TestAnomalyModelTrainerIntegration:
         explained_variance = np.sum(trainer.models.pca.explained_variance_ratio_)
         assert explained_variance > 0.6  # Минимум 60%
 
-        # Анализ важности признаков должен выделить RMS и Crest Factor
-        importance = trainer.models.get_feature_importance_isolation_forest(feature_names)
-
-        # RMS и Crest Factor должны быть среди важных признаков
-        sorted_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)
-        top_features = [name for name, _ in sorted_features[:5]]
-
-        # Проверяем, что среди топ-признаков есть RMS или Crest
-        has_rms_or_crest = any('rms_' in feat or 'crest_' in feat for feat in top_features)
-        assert has_rms_or_crest, f"RMS или Crest Factor должны быть в топ-признаках: {top_features}"
+    # Анализ важности IsolationForest удалён – пропуск
 
 
 if __name__ == "__main__":

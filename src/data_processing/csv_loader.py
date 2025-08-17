@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 BATCH_SIZE = 10_000
 DEFAULT_SAMPLE_RATE = 25_600  # Гц
 PHASE_NAMES = ['R', 'S', 'T']
-EXPECTED_HEADER_PATTERN = ['current_R', 'current_S', 'current_T']
+EXPECTED_HEADER_PATTERN = ['current_R', 'current_S', 'current_T']  # Новый строгий формат
 
 
 class CSVLoaderError(Exception):  # Базовое исключение
@@ -174,61 +174,46 @@ def calculate_file_hash(file_path: Path) -> str:
 
 
 def parse_csv_header(header_line: str) -> List[str]:
-    # Парсинг заголовка CSV (1..3 фазы) с автодополнением отсутствующих
-    phases_raw = [phase.strip() for phase in header_line.strip().split(',') if phase.strip()]
-    if len(phases_raw) == 0:
-        raise InvalidCSVFormatError("Заголовок пустой")
-    if len(phases_raw) > 3:
-        raise InvalidCSVFormatError(f"Слишком много фаз ({len(phases_raw)}): {phases_raw}")
-    expected_patterns = ['current_R', 'current_S', 'current_T']
-    # Оставляем только допустимые имена/или те что начинаются с current_
-    phases: List[str] = []
-    for i, name in enumerate(phases_raw):
-        if not name.startswith('current_'):
-            logger.warning(f"Нестандартное название фазы {i}: '{name}'")
-        phases.append(name)
-    # Автодополняем недостающие фазы в ожидаемом порядке
-    for exp in expected_patterns:
-        base = exp.split('_',1)[1]
-        # Уже есть такая? (точное совпадение)
-        if exp not in phases:
-            # Проверяем есть ли другая фаза с тем же суффиксом (например current_R vs R)
-            found_same = any(p.endswith(base) for p in phases)
-            if not found_same and len(phases) < 3:
-                phases.append(exp)
-    # Если после дополнения всё ещё <3 — дозаполняем в порядке expected
-    for exp in expected_patterns:
-        if len(phases) >= 3:
-            break
-        if exp not in phases:
-            phases.append(exp)
-    logger.info(f"Обнаружены/нормализованы фазы: {phases}")
-    return phases
+    """Разбор заголовка нового формата.
+
+    Ожидается строгая строка: "current_R,current_S,current_T" (порядок и имена обязательны).
+    Допускаются пробелы вокруг запятых.
+    """
+    parts = [p.strip() for p in header_line.strip().split(',')]
+    if parts != EXPECTED_HEADER_PATTERN:
+        raise InvalidCSVFormatError(
+            f"Неверный заголовок CSV: '{header_line}'. Ожидается: '{','.join(EXPECTED_HEADER_PATTERN)}'"
+        )
+    return parts
 
 
-def parse_csv_row(row_data: str, phase_count: int = 3) -> Tuple[List[float], List[bool]]:
-    # Парсинг строки CSV с дополняющими NaN
-    parts = [val.strip() for val in row_data.split(',')]
-    # Если значений меньше требуемого — наполняем пустыми
-    if len(parts) < phase_count:
-        parts += [''] * (phase_count - len(parts))
-    if len(parts) > phase_count:
-        parts = parts[:phase_count]
-    values: List[float] = []
-    nan_mask: List[bool] = []
-    for val_str in parts:
-        if val_str == '' or val_str.lower() in ('nan','null','none'):
-            values.append(np.nan)
-            nan_mask.append(True)
-        else:
-            try:
-                values.append(float(val_str))
-                nan_mask.append(False)
-            except Exception:
-                logger.warning(f"Некорректное значение: '{val_str}', -> NaN")
-                values.append(np.nan)
-                nan_mask.append(True)
-    return values, nan_mask
+def parse_csv_row(row_data: str, expected_values: int = 3) -> Tuple[List[Optional[float]], List[bool]]:
+    """Парсинг строки данных строгого формата.
+
+    Требуется ровно 3 значения. Пустые -> None. Некорректное (не float) значение логируем и считаем invalid
+    (возвращаем None, помечая mask True). Если количество значений не равно expected_values — бросаем
+    InvalidCSVFormatError для внешней обработки.
+    """
+    parts = row_data.rstrip('\n').split(',')
+    if len(parts) != expected_values:
+        raise InvalidCSVFormatError(f"Строка содержит {len(parts)} значений вместо {expected_values}: '{row_data[:120]}'")
+    values: List[Optional[float]] = []
+    none_mask: List[bool] = []  # True если отсутствует или невалидно
+    for raw in parts:
+        val = raw.strip()
+        if val == '' or val.lower() in ('nan', 'null', 'none'):
+            values.append(None)
+            none_mask.append(True)
+            continue
+        try:
+            fv = float(val)
+            values.append(fv)
+            none_mask.append(False)
+        except Exception:
+            logger.error(f"Невалидное числовое значение '{val}' -> None")
+            values.append(None)
+            none_mask.append(True)
+    return values, none_mask
 
 
 async def find_equipment_by_filename(
@@ -341,6 +326,11 @@ class CSVLoader:
                         existing_obj = None
                 if existing_obj and not _st.is_testing:
                     self.logger.warning(f"Файл уже загружен (hash: {file_hash[:8]}...)")
+                    try:
+                        m.increment_counter('csv_duplicates_total', {'equipment_id': str(equipment_id) if equipment_id else 'unknown'})
+                        m.increment_counter('csv_duplicate_skipped_total', {'equipment_id': str(equipment_id) if equipment_id else 'unknown'})
+                    except Exception:
+                        pass
                     # возвращаем помеченную статистику
                     stats.finish()
                     return stats
@@ -393,7 +383,19 @@ class CSVLoader:
                         f"T={batch_stats['nan_counts']['T']}"
                     )
 
-                await session.commit()
+                from sqlalchemy.exc import IntegrityError
+                try:
+                    await session.commit()
+                except IntegrityError as ie:  # возможный дубликат file_hash при гонке
+                    await session.rollback()
+                    self.logger.warning(f"IntegrityError (вероятно дубликат) при commit: {ie}")
+                    try:
+                        m.increment_counter('csv_duplicates_total', {'equipment_id': str(equipment_id) if equipment_id else 'unknown'})
+                        m.increment_counter('csv_duplicate_skipped_total', {'equipment_id': str(equipment_id) if equipment_id else 'unknown'})
+                    except Exception:
+                        pass
+                    stats.finish()
+                    return stats
 
         except Exception as e:
             self.logger.error(f"Ошибка при обработке файла {file_path}: {e}")
@@ -448,16 +450,20 @@ class CSVLoader:
             header = next(reader, None)
             if not header:
                 raise InvalidCSVFormatError("Пустой файл")
-            # поддержка одного столбца с заголовком
             header_line = header[0] if len(header) == 1 else ','.join(header)
             parse_csv_header(header_line)
             for row in reader:
                 if not row:
                     continue
                 line = row[0] if len(row) == 1 else ','.join(row)
-                values, mask = parse_csv_row(line)
+                try:
+                    values, mask = parse_csv_row(line)
+                except InvalidCSVFormatError as e:
+                    stats.invalid_rows += 1
+                    self.logger.error(f"Неверная структура строки: {e}")
+                    continue
                 for i, phase in enumerate(['R','S','T']):
-                    data_lists[phase].append(values[i])
+                    data_lists[phase].append(values[i] if values[i] is not None else np.nan)
                 stats.processed_rows += 1
         # Формируем numpy массивы
         data_arrays: Dict[str, np.ndarray] = {}
@@ -496,6 +502,7 @@ class CSVLoader:
         file_hash: str,
         session: AsyncSession,
         metadata: Optional[Dict] = None,
+        stats: Optional[CSVProcessingStats] = None,
     ) -> AsyncGenerator[Dict, None]:
         # Итеративная обработка файла по пачкам
         with open(file_path, 'r', encoding='utf-8') as csvfile:
@@ -529,61 +536,63 @@ class CSVLoader:
                     continue
 
                 try:
-                    # Парсим строку данных
                     row_line = row[0] if (len(row) == 1) else ','.join(row)
                     values, nan_mask = parse_csv_row(row_line)
-
-                    # Добавляем данные в пачку
-                    for i, phase in enumerate(['R', 'S', 'T']):
-                        batch_data[phase].append(values[i])
-                        if nan_mask[i]:
-                            batch_nan_counts[phase] += 1
-
-                    batch_size += 1
-
-                    # Если пачка заполнена, сохраняем
-                    batch_t0 = time.time()
-                    if batch_size >= self.batch_size:
-                        save_result = await self._save_batch_to_db(
-                            batch_data, equipment_id, sample_rate,
-                            recorded_at, file_hash, file_path.name, session, metadata
-                        )
-                        if not isinstance(save_result, tuple) or len(save_result) != 3:
-                            raw_id, samples_count, phases_present = None, 0, {'R':False,'S':False,'T':False}
-                        else:
-                            raw_id, samples_count, phases_present = save_result
-
-                        # Возвращаем статистику пачки
-                        yield {
-                            'processed_rows': batch_size,
-                            'nan_counts': batch_nan_counts.copy(),
-                            'raw_id': raw_id,
-                            'samples_count': samples_count,
-                            'phases_present': phases_present
-                        }
-
-                        # Очищаем пачку
-                        batch_data = {'R': [], 'S': [], 'T': []}
-                        batch_nan_counts = {'R': 0, 'S': 0, 'T': 0}
-                        # Метрики по пачке
-                        try:
-                            m.observe_histogram('csv_batch_rows', float(self.batch_size), {'equipment_id': str(equipment_id)})
-                            m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
-                        except Exception:
-                            pass
-                        batch_size = 0
-                        try:
-                            for p in ['R','S','T']:
-                                if phases_present.get(p):
-                                    m.increment_counter('data_points_processed_total', {'equipment_id': str(equipment_id), 'phase': p}, value=float(samples_count))
-                        except Exception:
-                            pass
-
-                except Exception as e:
+                except InvalidCSVFormatError as e:
+                    if stats:
+                        stats.invalid_rows += 1
                     if corrupt_logged < 100:
-                        self.logger.warning(f"Ошибка в строке {row_number}: {e}")
+                        self.logger.error(f"Строка {row_number}: {e}")
                         corrupt_logged += 1
                     continue
+
+                # Добавляем данные в пачку (вынесено из блока except, раньше было недостижимо)
+                for i, phase in enumerate(['R', 'S', 'T']):
+                    v = values[i]
+                    is_missing = (v is None)
+                    batch_data[phase].append(np.nan if is_missing else v)
+                    if is_missing:
+                        batch_nan_counts[phase] += 1
+
+                batch_size += 1
+
+                # Если пачка заполнена, сохраняем
+                if batch_size >= self.batch_size:
+                    batch_t0 = time.time()
+                    save_result = await self._save_batch_to_db(
+                        batch_data, equipment_id, sample_rate,
+                        recorded_at, file_hash, file_path.name, session, metadata
+                    )
+                    if not isinstance(save_result, tuple) or len(save_result) != 3:
+                        raw_id, samples_count, phases_present = None, 0, {'R':False,'S':False,'T':False}
+                    else:
+                        raw_id, samples_count, phases_present = save_result
+
+                    # Возвращаем статистику пачки
+                    yield {
+                        'processed_rows': batch_size,
+                        'nan_counts': batch_nan_counts.copy(),
+                        'raw_id': raw_id,
+                        'samples_count': samples_count,
+                        'phases_present': phases_present
+                    }
+
+                    # Очищаем пачку
+                    batch_data = {'R': [], 'S': [], 'T': []}
+                    batch_nan_counts = {'R': 0, 'S': 0, 'T': 0}
+                    # Метрики по пачке
+                    try:
+                        m.observe_histogram('csv_batch_rows', float(self.batch_size), {'equipment_id': str(equipment_id)})
+                        m.observe_histogram('csv_batch_duration_seconds', float(time.time() - batch_t0), {'equipment_id': str(equipment_id)})
+                    except Exception:
+                        pass
+                    batch_size = 0
+                    try:
+                        for p in ['R','S','T']:
+                            if phases_present.get(p):
+                                m.increment_counter('data_points_processed_total', {'equipment_id': str(equipment_id), 'phase': p}, value=float(samples_count))
+                    except Exception:
+                        pass
 
             # Сохраняем оставшиеся данные
             if batch_size > 0:
@@ -716,10 +725,21 @@ async def load_csv_files_from_directory(
                 sample_rate=sample_rate
             )
             results[file_path.name] = stats
+            try:  # метрики
+                from src.utils import metrics as _m
+                _m.increment_counter('csv_ingest_files_total', {'status': 'success'})
+                _m.increment_counter('csv_ingest_rows_total', value=float(stats.processed_rows))
+            except Exception:  # pragma: no cover
+                pass
 
         except Exception as e:
             logger.error(f"Ошибка при обработке {file_path.name}: {e}")
             results[file_path.name] = None
+            try:
+                from src.utils import metrics as _m
+                _m.increment_counter('csv_ingest_files_total', {'status': 'error'})
+            except Exception:  # pragma: no cover
+                pass
 
     return results
 

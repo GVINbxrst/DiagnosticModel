@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Скрипт для обучения моделей аномалий DiagMod
-Обучает Isolation Forest, DBSCAN и создает PCA визуализации
-"""
+"""CLI обучения актуальных моделей аномалий (DBSCAN + PCA + streaming baseline)."""
 
 import argparse
 import asyncio
@@ -40,11 +37,7 @@ async def train_models_cli(
         print(f"📊 Статистика обучения:")
         print(f"  └─ Версия модели: {results['model_version']}")
 
-        # Результаты Isolation Forest
-        if_results = results['isolation_forest']
-        print(f"\n🌲 Isolation Forest:")
-        print(f"  ├─ Найдено аномалий: {if_results['n_anomalies']}")
-        print(f"  └─ Доля аномалий: {if_results['anomaly_ratio']:.2%}")
+    # Legacy IsolationForest удалён – блок пропущен
 
         # Результаты DBSCAN
         db_results = results['dbscan']
@@ -61,13 +54,7 @@ async def train_models_cli(
         print(f"  └─ Общая объясненная дисперсия: {pca_results['total_variance_explained']:.1%}")
 
         # Важность признаков
-        if 'feature_importance' in results:
-            importance = results['feature_importance']
-            if 'isolation_forest' in importance:
-                top_features = importance['isolation_forest']['top_features'][:5]
-                print(f"\n⭐ Топ-5 важных признаков (Isolation Forest):")
-                for i, (feature, score) in enumerate(top_features, 1):
-                    print(f"  {i}. {feature}: {score:.4f}")
+    # PCA вклад выводится через визуализации / метаданные
 
         # Визуализации
         if 'visualizations' in results:

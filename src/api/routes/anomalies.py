@@ -500,3 +500,24 @@ async def reanalyze_equipment(
         "equipment_id": str(equipment_id),
         "estimated_completion_time": "10-30 минут"
     }
+
+
+@router.get("/forecast_rms/{equipment_id}")
+@router.get("/anomalies/forecast_rms/{equipment_id}", include_in_schema=False)
+async def forecast_rms_endpoint(
+    equipment_id: UUID,
+    steps: int = Query(24, ge=6, le=168),
+    threshold_sigma: float = Query(2.0, ge=0.5, le=5.0)
+):
+    """Прогноз среднеквадратичного тока (агрегированный RMS) на n часов вперёд.
+
+    Возвращает: threshold, forecast[], probability_over_threshold, model
+    """
+    from src.ml.forecasting import forecast_rms, InsufficientDataError
+    try:
+        result = await forecast_rms(equipment_id, n_steps=steps, threshold_sigma=threshold_sigma)
+        return result
+    except InsufficientDataError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"forecast_error: {e}")

@@ -16,6 +16,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import adfuller
 
 from src.config.settings import get_settings
+from .utils import save_model, load_model
 from src.database.connection import get_async_session
 from src.database.models import Feature, Equipment, RawSignal
 from src.utils.logger import get_logger
@@ -29,6 +30,140 @@ DEFAULT_FORECAST_STEPS = 24  # Прогноз на 24 шага вперед
 DEFAULT_ANOMALY_THRESHOLD = 1.5  # Порог аномалии (в стандартных отклонениях)
 MIN_OBSERVATIONS = 50  # Минимальное количество наблюдений для прогноза
 SEASONALITY_PERIOD = 24  # Период сезонности (24 часа)
+
+# ================= Embedding-based Sequence Forecaster (LSTM) =================
+import torch
+import torch.nn as nn
+
+class EmbeddingSequenceModel(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 64, num_layers: int = 1, dropout: float = 0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=dropout if num_layers>1 else 0.0)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim//2, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):  # x: (B, T, D)
+        out, _ = self.lstm(x)
+        last = out[:, -1, :]
+        return self.head(last)  # (B,1) risk probability
+
+
+async def build_embedding_sequence_dataset(equipment_id: UUID, horizon: int = 5, window: int = 16) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Формирует датасет (X,y) из последовательностей embedding'ов Feature.extra['embedding'].
+    y = вероятность дефекта через horizon шагов (эвристика: средний rms_mean превышает перцентиль 90).
+    """
+    async with get_async_session() as session:
+        q = select(Feature).join(RawSignal).where(RawSignal.equipment_id == equipment_id).order_by(Feature.window_start.asc())
+        res = await session.execute(q)
+        feats = res.scalars().all()
+    sequences = []
+    targets = []
+    embeddings = []
+    rms_series = []
+    for f in feats:
+        emb = None
+        if f.extra and isinstance(f.extra, dict):
+            emb = f.extra.get('embedding')
+        if emb and isinstance(emb, list):
+            try:
+                emb_vec = [float(x) for x in emb]
+            except Exception:
+                continue
+            vals = [v for v in [f.rms_a, f.rms_b, f.rms_c] if v is not None]
+            if not vals:
+                continue
+            rms_mean = float(np.mean([float(v) for v in vals]))
+            embeddings.append(emb_vec)
+            rms_series.append(rms_mean)
+    if len(embeddings) < window + horizon + 5:
+        raise InsufficientDataError("Недостаточно embedding точек для sequence модели")
+    arr_emb = np.array(embeddings, dtype=np.float32)
+    rms_arr = np.array(rms_series, dtype=np.float32)
+    thresh = float(np.percentile(rms_arr, 90))
+    for i in range(0, len(arr_emb) - window - horizon):
+        seq = arr_emb[i:i+window]
+        future = rms_arr[i+window:i+window+horizon]
+        risk = 1.0 if (future.mean() > thresh) else 0.0
+        sequences.append(seq)
+        targets.append([risk])
+    X = torch.tensor(np.stack(sequences), dtype=torch.float32)
+    y = torch.tensor(np.array(targets), dtype=torch.float32)
+    return X, y, arr_emb.shape[1]
+
+
+async def train_embedding_sequence_model(equipment_id: UUID, horizon: int = 5, window: int = 16, epochs: int = 5) -> dict:
+    """Обучает LSTM модель и сохраняет в кеш (если включен)."""
+    X, y, input_dim = await build_embedding_sequence_dataset(equipment_id, horizon=horizon, window=window)
+    model = EmbeddingSequenceModel(input_dim=input_dim)
+    device = torch.device('cpu')
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.BCELoss()
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        preds = model(X.to(device)).view(-1,1)
+        loss = criterion(preds, y.to(device))
+        loss.backward()
+        optimizer.step()
+    save_model({'state_dict': model.state_dict(), 'input_dim': input_dim}, f"lstm_seq/{equipment_id}")
+    try:
+        from src.utils.metrics import increment_counter
+        increment_counter('model_cache_events_total', {'model_name': 'lstm_seq', 'event': 'store'})
+    except Exception:  # pragma: no cover
+        pass
+    return {'model': model, 'loss': float(loss.item()), 'input_dim': input_dim}
+
+
+async def predict_sequence_risk(equipment_id: UUID, horizon: int = 5, window: int = 16) -> dict:
+    """Возвращает прогноз вероятности дефекта.
+
+    Сначала пытается загрузить LSTM модель из кеша; при отсутствии обучает и сохраняет.
+    """
+    cache = load_model(f"lstm_seq/{equipment_id}")
+    model: EmbeddingSequenceModel
+    input_dim: int
+    if cache is None:
+        try:
+            from src.utils.metrics import increment_counter
+            increment_counter('model_cache_events_total', {'model_name': 'lstm_seq', 'event': 'miss'})
+        except Exception:  # pragma: no cover
+            pass
+        data = await train_embedding_sequence_model(equipment_id, horizon=horizon, window=window, epochs=3)
+        model = data['model']
+        input_dim = data['input_dim']
+    else:
+        try:
+            from src.utils.metrics import increment_counter
+            increment_counter('model_cache_events_total', {'model_name': 'lstm_seq', 'event': 'hit'})
+        except Exception:  # pragma: no cover
+            pass
+        state_dict = cache['state_dict']
+        input_dim = cache['input_dim']
+        model = EmbeddingSequenceModel(input_dim=input_dim)
+        model.load_state_dict(state_dict)
+    # Формируем последнее окно
+    async with get_async_session() as session:
+        q = select(Feature).join(RawSignal).where(RawSignal.equipment_id == equipment_id).order_by(Feature.window_start.asc())
+        res = await session.execute(q)
+        feats = res.scalars().all()
+    emb_seq = []
+    for f in feats[-window:]:
+        emb = f.extra.get('embedding') if f.extra else None
+        if not emb:
+            return {'error': 'missing_embedding'}
+        emb_seq.append([float(x) for x in emb])
+    if len(emb_seq) < window:
+        return {'error': 'insufficient_recent_embeddings'}
+    X_last = torch.tensor(np.array([emb_seq], dtype=np.float32))
+    model.eval()
+    with torch.no_grad():
+        risk = float(model(X_last).item())
+    return {'equipment_id': str(equipment_id), 'horizon': horizon, 'window': window, 'risk_score': risk, 'cached': cache is not None}
 
 
 class ForecastingError(Exception):
@@ -47,6 +182,20 @@ async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: f
     from sqlalchemy import select
     from src.database.connection import get_async_session
     from src.database.models import Feature, RawSignal
+    from src.utils.metrics import increment_counter
+    from src.config.settings import get_settings as _gs
+
+    st = _gs()
+    cache_enabled = getattr(st, 'USE_MODEL_CACHE', True)
+    cache_key = f"prophet_rms/{equipment_id}"
+    prophet_cache = None
+    if cache_enabled:
+        try:
+            prophet_cache = load_model(cache_key)
+            if prophet_cache is not None:
+                increment_counter('model_cache_events_total', {'model_name': 'prophet_rms', 'event': 'hit'})
+        except Exception:  # pragma: no cover
+            prophet_cache = None
 
     async with get_async_session() as session:
         # Join Feature -> RawSignal. В тестовой среде на SQLite UUID могут храниться как TEXT.
@@ -94,13 +243,29 @@ async def forecast_rms(equipment_id: UUID, n_steps: int = 24, threshold_sigma: f
     forecast_values = []
     future_index = []
     try:
-        from prophet import Prophet  # type: ignore
-        m = Prophet(daily_seasonality=True, weekly_seasonality=False, yearly_seasonality=False)
-        m.fit(hourly)
-        future = m.make_future_dataframe(periods=n_steps, freq='h', include_history=False)
-        fc = m.predict(future)
-        forecast_values = fc['yhat'].tolist()
-        future_index = future['ds'].tolist()
+        if prophet_cache is not None:
+            # Повторяем прогноз из кешированной модели (refit не требуется)
+            m = prophet_cache['model']  # type: ignore[index]
+            future = m.make_future_dataframe(periods=n_steps, freq='h', include_history=False)
+            fc = m.predict(future)
+            forecast_values = fc['yhat'].tolist()
+            future_index = future['ds'].tolist()
+        else:
+            from prophet import Prophet  # type: ignore
+            m = Prophet(daily_seasonality=True, weekly_seasonality=False, yearly_seasonality=False)
+            m.fit(hourly)
+            future = m.make_future_dataframe(periods=n_steps, freq='h', include_history=False)
+            fc = m.predict(future)
+            forecast_values = fc['yhat'].tolist()
+            future_index = future['ds'].tolist()
+            if cache_enabled:
+                try:
+                    save_model({'model': m}, cache_key)
+                    increment_counter('model_cache_events_total', {'model_name': 'prophet_rms', 'event': 'store'})
+                except Exception:  # pragma: no cover
+                    pass
+        if prophet_cache is None:
+            increment_counter('model_cache_events_total', {'model_name': 'prophet_rms', 'event': 'miss'})
     except Exception:
         # Fallback: простое скользящее среднее последнего окна
         window = min(12, len(series))

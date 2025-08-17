@@ -30,7 +30,7 @@ from .components import (
     UIComponents, ChartComponents, FilterComponents,
     ExportComponents, NotificationComponents, ConfigComponents
 )
-from .pages import AdminPage
+from .pages import AdminPage, render_trends
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -533,7 +533,7 @@ def show_dashboard():
         st.metric("Статус", selected_equipment.get('status', 'N/A'))
     
     # Вкладки функциональности
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Обзор файлов", "📈 Анализ сигналов", "⚠️ Аномалии", "📄 Отчеты"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Обзор файлов", "📈 Анализ сигналов", "⚠️ Аномалии", "📄 Отчеты", "📈 Тренды"])
     
     with tab1:
         show_files_overview(data_manager, equipment_id)
@@ -546,6 +546,8 @@ def show_dashboard():
     
     with tab4:
         show_reports(data_manager, equipment_id, selected_equipment)
+    with tab5:
+        render_trends(API_BASE_URL, st.session_state.token, str(equipment_id))
 
 def show_files_overview(data_manager: DataManager, equipment_id: int):
     """Обзор файлов оборудования"""

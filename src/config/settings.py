@@ -61,11 +61,38 @@ class Settings(BaseSettings):
     DATA_PATH: str = Field(default="./data")
     CSV_BATCH_SIZE: int = Field(default=10000)
     FEATURE_EXTRACTION_WORKERS: int = Field(default=4)
+    # Включить параллельную обработку окон признаков (multiprocessing)
+    FEATURE_EXTRACTION_PARALLEL: bool = Field(default=True)
+    # Минимальное число окон, при котором имеет смысл включать параллельную обработку
+    FEATURE_PARALLEL_MIN_WINDOWS: int = Field(default=4)
+    MAX_CONCURRENT_FILES: int = Field(default=4)
+
+    # Политика хранения сырых сигналов: если False – после успешного извлечения признаков
+    # бинарные поля phase_a/phase_b/phase_c зануляются (экономия места)
+    RETAIN_RAW_SIGNALS: bool = Field(default=True)
+
+    # Ограничение выборки при обучении моделей аномалий (если None – без ограничения)
+    ANOMALY_TRAIN_SAMPLE_SIZE: int | None = Field(default=None)
+    # Включить стратифицированное семплирование по оборудованию
+    ANOMALY_TRAIN_STRATIFIED: bool = Field(default=True)
 
     # Настройки ML моделей
     MODELS_PATH: str = Field(default="./models")
     MODEL_AUTO_RETRAIN: bool = Field(default=True)
     ANOMALY_THRESHOLD: float = Field(default=0.95)
+    # Кеширование моделей
+    USE_MODEL_CACHE: bool = Field(default=True)
+    # Кеш предсказаний (секунды)
+    CACHE_EXPIRE_SECONDS: int = Field(default=300)
+
+    # Параметры TCN / sequence forecasting
+    TCN_WINDOW_SIZE: int = Field(default=32)
+    TCN_PREDICTION_HORIZON: int = Field(default=4)
+    TCN_CHANNELS: str = Field(default="64,64,64")  # список каналов через запятую
+    TCN_KERNEL_SIZE: int = Field(default=3)
+    TCN_DROPOUT: float = Field(default=0.1)
+    TCN_MAX_EPOCHS: int = Field(default=10)
+    TCN_LEARNING_RATE: float = Field(default=1e-3)
 
     # Настройки сигналов
     SIGNAL_SAMPLING_RATE: int = Field(default=25600)
@@ -75,6 +102,19 @@ class Settings(BaseSettings):
     # Настройки мониторинга
     PROMETHEUS_ENABLED: bool = Field(default=True)
     PROMETHEUS_PORT: int = Field(default=8001)
+
+    # Почасовые агрегаты / feature store
+    FEATURE_SUMMARY_ENABLED: bool = Field(default=True)
+    FEATURE_STORE_BACKEND: str = Field(default="db")  # db | redis
+    FEATURE_SUMMARY_WINDOW: int = Field(default=60)  # минут, резерв (пока используем только час)
+    MAX_FEATURE_STORE_POINTS: int = Field(default=2000)  # лимит точек в памяти (redis backend)
+
+    # Авто-инжест при старте API (опционально)
+    INGEST_STARTUP_DIR: Optional[str] = Field(default=None)
+    INGEST_FILE_PATTERN: str = Field(default="*.csv")
+    INGEST_MAX_FILES: Optional[int] = Field(default=None)
+    INGEST_TRAIN_FULL: bool = Field(default=False)
+    AUTO_FORECAST_AFTER_INGEST: bool = Field(default=True)
 
     # Настройки Dashboard
     DASHBOARD_HOST: str = Field(default="0.0.0.0")

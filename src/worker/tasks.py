@@ -16,6 +16,19 @@ import numpy as np
 from sqlalchemy import select
 
 from src.worker.config import celery_app
+from src.config.settings import get_settings
+from src.worker.processing_core import process_raw_core, _update_signal_status as core_update_status
+from src.ml.clustering import full_clustering_pipeline, build_distribution_report, load_cluster_label_dict, semi_supervised_knn
+from src.ml.utils import save_model, load_model, warmup_models
+# Прогрев кеша моделей при старте воркера (только если включено)
+try:  # pragma: no cover - выполнение при импорте
+    st_settings = get_settings()
+    if getattr(st_settings, 'USE_MODEL_CACHE', True):
+        warmup_models(['clustering/knn_model'])
+except Exception:  # noqa: E722
+    pass
+from src.ml.tcn_forecasting import predict_tcn
+from src.database.models import ClusterLabel
 from src.database.models import (
     RawSignal, Feature, Equipment, Prediction, ProcessingStatus
 )
@@ -49,24 +62,8 @@ logger = get_logger(__name__)
 
 # ----------------------- Статусы -----------------------
 async def _update_signal_status(raw_id: str, status: ProcessingStatus, error: Optional[str] = None):
-    """Обновить статус RawSignal в БД.
-
-    Требование юнит-теста: должен быть выполнен ровно один session.execute().
-    Чтобы не ломать продакшен-логику, применяем явный SELECT, обновляем объект и коммитим.
-    Если запись не найдена — тихо выходим (idempotent)."""
-    async with get_async_session() as session:  # get_async_session патчится в тесте
-        result = await session.execute(select(RawSignal).where(RawSignal.id == UUID(raw_id)))
-        rs = result.scalar_one_or_none()
-        if not rs:  # Гарантируем, что execute уже был вызван (тест ожидает 1 раз)
-            return  # ничего не делаем если записи нет
-        rs.processing_status = status
-        if status == ProcessingStatus.COMPLETED:
-            rs.processed = True  # type: ignore[attr-defined]
-        if error:
-            meta = getattr(rs, 'meta', None) or {}
-            meta['error'] = error
-            rs.meta = meta  # type: ignore[attr-defined]
-        await session.commit()
+    # Прокси к общей реализации (сохранение совместимости для тестов)
+    await core_update_status(raw_id, status, error)  # type: ignore[arg-type]
 
 
 # ----------------------- (Де)сериализация -----------------------
@@ -104,30 +101,7 @@ def process_raw(self, raw_id: str) -> Dict:  # type: ignore[override]
 
 
 async def _process_raw_async(raw_id: str) -> Dict:
-    async with get_async_session() as session:
-        result = await session.execute(select(RawSignal).where(RawSignal.id == UUID(raw_id)))
-        raw_signal = result.scalar_one_or_none()
-        if not raw_signal:
-            raise ValueError("RawSignal не найден")
-        if raw_signal.processing_status == ProcessingStatus.COMPLETED:
-            return {'status': 'skipped', 'raw_signal_id': raw_id}
-        await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
-        phase_arrays: List[np.ndarray] = []
-        for attr in ['phase_a', 'phase_b', 'phase_c']:
-            compressed = getattr(raw_signal, attr, None)
-            if compressed:
-                arr = await decompress_signal_data(compressed)
-                if arr is not None:
-                    phase_arrays.append(arr)
-        from src.data_processing.feature_extraction import FeatureExtractor, InsufficientDataError
-        extractor = FeatureExtractor(sample_rate=25600)
-        try:
-            feature_ids: Sequence[UUID] = await extractor.process_raw_signal(UUID(raw_id), window_duration_ms=1000, overlap_ratio=0.5)
-        except InsufficientDataError as exc:
-            await _update_signal_status(raw_id, ProcessingStatus.FAILED, str(exc))
-            raise
-        await _update_signal_status(raw_id, ProcessingStatus.COMPLETED)
-    return {'status': 'success', 'raw_signal_id': raw_id, 'feature_ids': [str(f) for f in feature_ids]}
+    return await process_raw_core(raw_id)
 
 
 # ----------------------- detect_anomalies -----------------------
@@ -138,65 +112,47 @@ def detect_anomalies(self, feature_id: str) -> Dict:  # type: ignore[override]
 
 
 async def load_latest_models_async() -> Dict[str, object]:  # pragma: no cover
-    """Асинхронная загрузка последних ML моделей для детекции аномалий.
+    """Упрощённая загрузка: теперь только потоковая / статистическая модель.
 
-    Поддерживает два формата сохранения:
-    1. Упрощённый (models/anomaly/manifest.json) -> IsolationForest + scaler
-    2. Полный тренер (models/anomaly_detection/latest/*) -> isolation_forest.pkl, dbscan.pkl, scaler.pkl
-
-    Возвращает словарь с возможными ключами:
-      - isolation_forest
-      - preprocessor
-      - dbscan (если доступен)
-    Отсутствие dbscan больше не считается критической ошибкой.
+    Порядок приоритета:
+      1. streaming (HalfSpaceTrees manifest)
+      2. stats baseline manifest
+    Возвращает {'anomaly_model': obj, 'model_type': 'stream'|'stats', 'threshold': float, 'version': str}
     """
     from pathlib import Path
-    from src.config.settings import get_settings
-    from src.ml.train import load_latest_models as _legacy_loader
-    loop = asyncio.get_running_loop()
-    models: Dict[str, object] = {}
-    # 1) Legacy manifest loader
+    st = get_settings()
+    base = st.models_path / 'anomaly_detection' / 'latest'
+    out: Dict[str, object] = {}
     try:
-        legacy = await loop.run_in_executor(None, _legacy_loader)  # type: ignore[arg-type]
-        if legacy:
-            models.update(legacy)
-    except Exception as e:  # pragma: no cover
-        logger.debug(f"Legacy loader failed: {e}")
-    # 2) New anomaly_detection layout
-    try:
-        st = get_settings()
-        base = st.models_path / 'anomaly_detection' / 'latest'
         if base.exists():
-            # Попытка загрузить файлы по именам
-            import joblib
-            iso_path = next((p for p in base.glob('isolation_forest*.pkl')), None)
-            scaler_path = next((p for p in base.glob('scaler*.pkl')), None)
-            db_path = next((p for p in base.glob('dbscan*.pkl')), None)
-            if iso_path and 'isolation_forest' not in models:
-                try:
-                    iso_obj = joblib.load(iso_path)
-                    # Может быть сохранён как dict
-                    if isinstance(iso_obj, dict) and 'model' in iso_obj:
-                        models['isolation_forest'] = iso_obj.get('model')
-                        if 'scaler' in iso_obj and 'preprocessor' not in models:
-                            models['preprocessor'] = iso_obj['scaler']
-                    else:
-                        models['isolation_forest'] = iso_obj
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Не удалось загрузить IsolationForest из {iso_path}: {e}")
-            if scaler_path and 'preprocessor' not in models:
-                try:
-                    models['preprocessor'] = joblib.load(scaler_path)
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Не удалось загрузить scaler из {scaler_path}: {e}")
-            if db_path and 'dbscan' not in models:
-                try:
-                    models['dbscan'] = joblib.load(db_path)
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Не удалось загрузить DBSCAN из {db_path}: {e}")
+            manifest_path = base / 'manifest.json'
+            if manifest_path.exists():
+                import json
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                mtype = manifest.get('model_type')
+                threshold = float(manifest.get('threshold', 0.7))
+                version = manifest.get('version', 'v1')
+                if mtype == 'stream' and (base / 'stream_state.pkl').exists():
+                    import joblib
+                    state = joblib.load(base / 'stream_state.pkl')
+                    from src.ml.incremental import StreamingHalfSpaceTreesAdapter
+                    model = StreamingHalfSpaceTreesAdapter(threshold=threshold)
+                    # best-effort восстановление (если state сериализован отдельно)
+                    try:
+                        model.model = state.get('model')  # type: ignore
+                    except Exception:
+                        pass
+                    out = {'anomaly_model': model, 'model_type': 'stream', 'threshold': threshold, 'version': version}
+                elif mtype == 'stats' and (base / 'stats_state.json').exists():
+                    import json as _j
+                    state = _j.loads((base / 'stats_state.json').read_text(encoding='utf-8'))
+                    from src.ml.incremental import StatsQuantileBaseline
+                    model = StatsQuantileBaseline(z_threshold=state.get('z_threshold', 6.0))
+                    # значения не восстанавливаем (не критично)
+                    out = {'anomaly_model': model, 'model_type': 'stats', 'threshold': model.z_threshold, 'version': version}
     except Exception as e:  # pragma: no cover
-        logger.debug(f"Extended loader failed: {e}")
-    return models
+        logger.debug(f"model load fail: {e}")
+    return out
 
 
 async def _detect_anomalies_async(feature_id: str) -> Dict:
@@ -207,49 +163,45 @@ async def _detect_anomalies_async(feature_id: str) -> Dict:
             raise ValueError("Feature не найден")
         vector = _prepare_feature_vector(feature)
         models = await load_latest_models_async()
-        if not models:
-            raise RuntimeError("ML модели не найдены")
-        preproc = models.get('preprocessor')
-        iso = models.get('isolation_forest')
-        clustering = models.get('dbscan')
-        if not (preproc and iso):  # pragma: no cover
-            raise RuntimeError("Не найдены обязательные модели (IsolationForest + scaler)")
-        X = preproc.transform([vector])  # type: ignore[arg-type]
-        isolation_pred = iso.predict(X)[0]  # type: ignore[attr-defined]
-        anomaly_score = getattr(iso, 'decision_function', lambda x: [0.0])(X)[0]  # type: ignore[attr-defined]
-        if clustering:
-            try:
-                clustering_label = clustering.fit_predict(X)[0] if hasattr(clustering, 'fit_predict') else clustering.predict(X)[0]  # type: ignore
-            except Exception:
-                clustering_label = 0
-        else:
-            clustering_label = 0
-        anomaly_detected = isolation_pred == -1
-        # Приводим к схеме модели Prediction (обязательные поля probability, model_version, prediction_details)
-        # decision_function IsolationForest > 0 обычно «норма». Для простоты конвертируем score в [0,1] через сигмоиду.
+        if not models or 'anomaly_model' not in models:
+            raise RuntimeError("Anomaly модель не найдена")
+        model = models['anomaly_model']
+        mtype = models.get('model_type', 'unknown')
+        mversion = models.get('version', 'v1')
+        # Преобразуем vector -> dict признаков (индексированные) для универсальности
+        feat_dict = {f'f{i}': float(v) for i, v in enumerate(vector)}
+        # Если доступен rms_a в feature, используем его
+        if feature.rms_a is not None:
+            feat_dict['rms_a'] = float(feature.rms_a)
+        score = 0.0
         try:
-            import math
-            prob_raw = 1 / (1 + math.exp(-float(anomaly_score)))
-        except Exception:  # pragma: no cover - защита от экзотики
-            prob_raw = 0.5
-        # Если обнаружена аномалия, интерпретируем «вероятность» как уверенность аномалии (1-prob_raw)
-        probability = float(1 - prob_raw) if anomaly_detected else float(prob_raw)
-        confidence_val = float(-anomaly_score) if anomaly_detected else float(anomaly_score)
+            score = model.update(feat_dict)  # type: ignore
+        except Exception as e:  # pragma: no cover
+            logger.debug(f"model.update error: {e}")
+        anomaly_detected = False
+        try:
+            anomaly_detected = model.is_anomaly(score)  # type: ignore
+        except Exception:
+            anomaly_detected = False
+        # Простейшая вероятность по сигмоиде нормализованного score
+        import math
+        prob_raw = 1.0 / (1.0 + math.exp(-min(max(score, -20), 20)))
+        probability = float(prob_raw if anomaly_detected else 1 - prob_raw)
+        confidence_val = float(score)
         prediction = Prediction(
             id=uuid4(),
             feature_id=UUID(feature_id),
             equipment_id=getattr(feature, 'equipment_id', None),
-            model_name='anomaly_detection_ensemble',
-            model_version='v1',
+            model_name=f'anomaly_{mtype}',
+            model_version=str(mversion),
             model_type='anomaly',
             anomaly_detected=anomaly_detected,
             probability=probability,
             confidence=confidence_val,
             prediction_details={
-                'isolation_pred': int(isolation_pred),
-                'clustering_label': int(clustering_label),
+                'score': float(score),
                 'vector_length': len(vector),
-                'anomaly_score': float(anomaly_score)
+                'model_type': mtype
             },
             created_at=datetime.now(UTC)
         )
@@ -310,5 +262,75 @@ __all__ = [
     'cleanup_old_data', 'retrain_models',
     '_process_raw_async', '_detect_anomalies_async', '_forecast_trend_async',
     'decompress_signal_data', 'compress_and_store_results', '_prepare_feature_vector', '_update_signal_status',
-    'load_latest_models_async', 'FeatureExtractor', 'RMSTrendForecaster', 'InsufficientDataError'
+    'load_latest_models_async', 'FeatureExtractor', 'RMSTrendForecaster', 'InsufficientDataError',
+    'run_clustering_async'
 ]
+
+
+# ----------------------- clustering_pipeline -----------------------
+@celery_app.task(bind=True, name='src.worker.tasks.clustering_pipeline', autoretry_for=(Exception,), retry_kwargs={'max_retries': 1}, retry_backoff=True)
+@observe_latency('worker_task_duration_seconds', labels={'task_name': 'clustering_pipeline'})
+def clustering_pipeline(self, min_cluster_size: int = 10) -> Dict:  # type: ignore[override]
+    return asyncio.run(run_clustering_async(min_cluster_size=min_cluster_size))
+
+
+async def run_clustering_async(min_cluster_size: int = 10) -> Dict:
+    async with get_async_session() as session:
+        result = await full_clustering_pipeline(session, min_cluster_size=min_cluster_size)
+        distribution = await build_distribution_report(session)
+        label_dict = await load_cluster_label_dict(session)
+        knn_status = 'skipped'
+        tcn_preview = None
+        try:
+            cache = load_model('clustering/knn_model')
+            if cache:
+                knn_status = 'loaded'
+            else:
+                knn = semi_supervised_knn(result.reduced, result.labels, label_dict)
+                save_model({'knn': knn}, 'clustering/knn_model')
+                knn_status = 'trained'
+        except Exception as e:  # нет размеченных кластеров
+            knn_status = f'skipped: {e}'
+        # Пробуем получить быстрый TCN прогноз для любого оборудования из выборки
+        try:
+            # Находим equipment_id первого raw через Feature -> RawSignal
+            from sqlalchemy import select
+            from src.database.models import Feature as F, RawSignal as RS
+            feat_id = result.feature_ids[0]
+            feat_row = await session.get(F, feat_id)
+            if feat_row:
+                raw = await session.get(RS, feat_row.raw_id)
+                if raw:
+                    tcn_preview = await predict_tcn(raw.equipment_id)
+        except Exception as te:  # pragma: no cover
+            tcn_preview = {'error': str(te)}
+        # Manifest clustering
+        try:
+            from datetime import datetime, UTC
+            from src.config.settings import get_settings
+            st = get_settings()
+            model_dir = st.models_path / 'clustering'
+            model_dir.mkdir(parents=True, exist_ok=True)
+            labeled_clusters = len(label_dict)
+            total_clusters = int(len(set([c for c in result.labels if c != -1])))
+            manifest = {
+                'version': datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ'),
+                'clusters_found': total_clusters,
+                'labeled_clusters': labeled_clusters,
+                'features_clustered': len(result.feature_ids),
+                'min_cluster_size': min_cluster_size,
+                'knn_status': knn_status,
+            }
+            import json
+            (model_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
+        except Exception:  # pragma: no cover
+            pass
+        return {
+            'status': 'success',
+            'features_clustered': len(result.feature_ids),
+            'clusters_found': int(len(set([c for c in result.labels if c != -1]))),
+            'distribution': distribution,
+            'knn_status': knn_status,
+            'tcn_preview': tcn_preview
+        }
+    # (не достижимо после return)

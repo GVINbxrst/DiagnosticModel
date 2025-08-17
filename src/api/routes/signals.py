@@ -18,6 +18,12 @@ from src.database.connection import get_async_session, db_session
 from src.database.models import RawSignal, Equipment, ProcessingStatus
 from src.utils.logger import get_logger
 from src.utils.metrics import observe_latency
+from src.database.connection import get_async_session
+from src.database.models import Forecast
+from src.ml.forecasting import predict_sequence_risk
+from src.utils.prediction_cache import get_cached_prediction, cache_prediction
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -200,6 +206,23 @@ async def list_signals(
         has_next=has_next
     )
 
+@router.get("/equipment/{equipment_id}/rms/hourly")
+async def get_equipment_hourly_rms(
+    equipment_id: UUID,
+    limit: int = Query(168, ge=1, le=1000, description="Количество точек (часов)")
+):
+    """Возвращает последние почасовые значения rms_mean из feature store.
+
+    Используется на дашборде для трендов. По умолчанию 168 (неделя).
+    """
+    from src.utils.feature_store import get_feature_store
+    store = await get_feature_store()
+    try:
+        data = await store.get_recent_rms(equipment_id, limit=limit)
+    except Exception as e:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"feature_store_error: {e}")
+    return {"equipment_id": str(equipment_id), "points": data}
+
 
 @router.get("/signals/{raw_id}/preview")
 async def get_signal_preview(
@@ -298,3 +321,88 @@ async def list_equipment(
         }
         for eq in equipment_list
     ]
+
+
+@router.get("/signals/{raw_id}/embeddings", response_model=List[dict])
+async def get_signal_embeddings(
+    raw_id: UUID,
+    current_user: UserInfo = Depends(require_any_role),
+    session: AsyncSession = Depends(get_async_session)
+):
+    """Вернуть список эмбеддингов для всех окон признаков данного сырого сигнала."""
+    from sqlalchemy import select
+    from src.database.models import Feature
+    res = await session.execute(select(Feature).where(Feature.raw_id == raw_id))
+    feats = res.scalars().all()
+    if not feats:
+        raise HTTPException(status_code=404, detail="Features not found for raw_id")
+    out = []
+    for f in feats:
+        emb = None
+        if f.extra and isinstance(f.extra, dict):
+            emb = f.extra.get('embedding')
+        if emb is not None:
+            out.append({
+                'feature_id': str(f.id),
+                'window_start': f.window_start.isoformat(),
+                'window_end': f.window_end.isoformat(),
+                'embedding_dim': len(emb) if isinstance(emb, (list, tuple)) else None,
+                'embedding': emb
+            })
+    return out
+
+@router.get("/signals/sequence_risk/{equipment_id}")
+async def sequence_risk(
+    equipment_id: UUID,
+    horizon: int = Query(5, ge=1, le=48),
+    window: int = Query(16, ge=4, le=128),
+    current_user: UserInfo = Depends(require_any_role)
+):
+    cache_key = f"seqrisk:{equipment_id}:{horizon}:{window}"
+    cached = await get_cached_prediction(cache_key)
+    if cached:
+        return cached
+    try:
+        seq_res = await predict_sequence_risk(equipment_id, horizon=horizon, window=window)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"sequence_model_error: {e}")
+    if 'risk_score' in seq_res:
+        await cache_prediction(cache_key, seq_res, expire_seconds=300)
+    return seq_res
+
+
+@router.post("/predict_trend/{signal_id}")
+async def predict_trend(signal_id: UUID, horizon: int = 5, window: int = 16, current_user: UserInfo = Depends(require_any_role), session: AsyncSession = Depends(get_async_session)):
+    # Определяем оборудование по сигналу
+    res = await session.execute(select(RawSignal).where(RawSignal.id == signal_id))
+    raw = res.scalar_one_or_none()
+    if not raw:
+        raise HTTPException(status_code=404, detail="RawSignal not found")
+    cache_key = f"trend:{signal_id}:{horizon}:{window}"
+    cached = await get_cached_prediction(cache_key)
+    if cached:
+        logger.info(f"prediction cache hit {cache_key}")
+        return cached
+    try:
+        seq_res = await predict_sequence_risk(raw.equipment_id, horizon=horizon, window=window)
+        if 'risk_score' not in seq_res:
+            return seq_res
+        fc = Forecast(
+            raw_id=raw.id,
+            equipment_id=raw.equipment_id,
+            horizon=horizon,
+            method='embedding_lstm',
+            forecast_data={'model':'embedding_lstm','horizon':horizon,'window':window},
+            probability_over_threshold=None,
+            risk_score=seq_res['risk_score'],
+            model_version='v1'
+        )
+        session.add(fc)
+        await session.commit()
+        resp = {'signal_id': str(signal_id), 'equipment_id': str(raw.equipment_id), 'risk_score': seq_res['risk_score'], 'forecast_id': str(fc.id)}
+        await cache_prediction(cache_key, resp)
+        logger.info(f"prediction cache store {cache_key}")
+        return resp
+    except Exception as e:
+        logger.error(f"sequence forecast error: {e}")
+        raise HTTPException(status_code=500, detail='sequence_forecast_failed')

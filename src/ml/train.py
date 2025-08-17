@@ -1,4 +1,4 @@
-# Обучение моделей аномалий (IsolationForest, DBSCAN, PCA, анализ признаков)
+# Обучение моделей аномалий (streaming / stats baseline)
 
 import json
 import pickle
@@ -14,7 +14,6 @@ import pandas as pd
 import seaborn as sns
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
-from sklearn.ensemble import IsolationForest
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.metrics import silhouette_score, adjusted_rand_score
@@ -25,6 +24,11 @@ from src.config.settings import get_settings
 from src.database.connection import get_async_session
 from src.database.models import Feature, Equipment, RawSignal
 from src.utils.logger import get_logger
+try:  # river опционален
+    from src.ml.incremental import HalfSpaceTreesIncremental
+    RIVER_OK = True
+except Exception:  # pragma: no cover
+    RIVER_OK = False
 
 # Настройки
 settings = get_settings()
@@ -35,41 +39,168 @@ DEFAULT_CONTAMINATION = 0.1  # Ожидаемая доля аномалий
 DEFAULT_RANDOM_STATE = 42
 MIN_SAMPLES_FOR_TRAINING = 100
 
-def load_latest_models() -> Dict[str, object]:
-    # Загрузить последнюю IsolationForest (manifest models/anomaly)
-    model_dir = settings.models_path / 'anomaly'
-    manifest_path = model_dir / 'manifest.json'
-    if not manifest_path.exists():
-        return {}
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-        # Ищем самый поздний updated_at
-        latest_key = None
-        latest_ts = None
-        for k, v in manifest.items():
-            ts = v.get('updated_at')
-            if ts:
+
+def retrain_stream_or_stats_minimal(prefer_stream: bool = True) -> str:
+    """Минимальное переобучение новой *поточной* (stream) или статистической (stats) модели аномалий.
+
+    Логика:
+      1. Загружаем до 5000 последних записей признаков (как и в IF минималке)
+      2. Пытаемся инициализировать StreamingHalfSpaceTreesAdapter (river)
+         - Если river недоступен или данных мало (< 30), используем StatsQuantileBaseline
+      3. Для stream: проходим по объектам, собираем предварительные score (до learn_one) => вычисляем порог как квантиль (0.98) или fallback 0.7
+         Сохраняем состояние модели в stream_state.pkl (joblib)
+      4. Для stats: кормим baseline.update, вычисляем median/MAD, сохраняем state в stats_state.json
+      5. manifest.json перезаписываем полями: model_type, threshold, version, n_samples, created_at, quantile(если stream)
+
+    Возвращает строку версии (UTC timestamp).
+    """
+    import asyncio, json, joblib
+    from datetime import datetime, UTC
+    import numpy as _np
+    from pathlib import Path
+    st = get_settings()
+    models_dir = st.models_path / 'anomaly_detection' / 'latest'
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Загрузка признаков (аналогично функции выше)
+    async def _load():
+        async with get_async_session() as session:
+            res = await session.execute(select(Feature))
+            feats = res.scalars().all()
+            return feats
+    feats = asyncio.run(_load())  # type: ignore
+    if not feats:
+        raise InsufficientDataError('Нет признаков для переобучения (stream/stats)')
+
+    # Берём ограниченный набор
+    feats = feats[:5000]
+    # Формируем словари только с базовыми статистическими признаками (rms/crest/kurt/skew + mean/std/min/max для фаз)
+    stat_cols = [
+        'rms_a','rms_b','rms_c','crest_a','crest_b','crest_c','kurt_a','kurt_b','kurt_c',
+        'skew_a','skew_b','skew_c','mean_a','mean_b','mean_c','std_a','std_b','std_c',
+        'min_a','min_b','min_c','max_a','max_b','max_c']
+    rows: list[dict[str,float]] = []
+    for f in feats:
+        d = {}
+        for c in stat_cols:
+            v = getattr(f, c, None)
+            if v is not None:
                 try:
-                    dt = datetime.fromisoformat(ts)
+                    d[c] = float(v)
                 except Exception:
-                    dt = datetime.min
-            else:
-                dt = datetime.min
-            if latest_ts is None or dt > latest_ts:
-                latest_ts = dt
-                latest_key = k
-        if not latest_key:
-            return {}
-        model_path = Path(manifest[latest_key]['path'])
-        if not model_path.exists():
-            return {}
-        data = joblib.load(model_path)
-        model = data.get('model')
-        scaler = data.get('scaler')
-        return {'isolation_forest': model, 'preprocessor': scaler}
-    except Exception as e:
-        logger.warning(f"Не удалось загрузить модели: {e}")
-        return {}
+                    pass
+        if d:
+            rows.append(d)
+
+    if len(rows) < 5:  # слишком мало для чего-либо осмысленного
+        # fallback сразу на baseline c заглушкой
+        from src.ml.incremental import StatsQuantileBaseline
+        baseline = StatsQuantileBaseline()
+        for r in rows:
+            baseline.update(r)
+        arr = _np.array(baseline.values) if baseline.values else _np.array([0.0])
+        med = float(_np.median(arr))
+        mad = float(_np.median(_np.abs(arr - med))) + 1e-9
+        version = datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')
+        (models_dir / 'stats_state.json').write_text(json.dumps({
+            'z_threshold': baseline.z_threshold,
+            'n_samples': len(arr),
+            'median': med,
+            'mad': mad
+        }, indent=2, ensure_ascii=False), encoding='utf-8')
+        manifest = {
+            'model_type': 'stats',
+            'threshold': baseline.z_threshold,
+            'version': version,
+            'n_samples': len(arr),
+            'created_at': datetime.now(UTC).isoformat()
+        }
+        (models_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
+        logger.info(f"[retrain] Stats baseline (few samples) версия {version}")
+        return version
+
+    # 2. Попытка stream
+    used_stream = False
+    threshold = 0.7
+    quantile = None
+    outlier_ratio = None
+    version = datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')
+    try:
+        if prefer_stream:
+            from src.ml.incremental import StreamingHalfSpaceTreesAdapter  # type: ignore
+            adapter = StreamingHalfSpaceTreesAdapter(threshold=threshold)
+            scores: list[float] = []
+            # Собираем объединённое множество всех используемых ключей для согласованности (опционально не обязательно)
+            for r in rows:
+                # score перед learn
+                s = adapter.model.score_one(r)  # type: ignore[attr-defined]
+                scores.append(float(s))
+                adapter.model.learn_one(r)  # type: ignore[attr-defined]
+            if len(scores) >= 30:
+                quantile = float(_np.quantile(_np.array(scores), 0.98))
+                # Порог = max(default, quantile) чтобы не занижать
+                threshold = max(0.7, quantile)
+                adapter.threshold = threshold
+            if scores:
+                arr_scores = _np.array(scores)
+                outlier_ratio = float((arr_scores > threshold).mean()) if threshold > 0 else 0.0
+            # Сохраняем состояние
+            joblib.dump({'model': adapter.model}, models_dir / 'stream_state.pkl', compress=3)
+            manifest = {
+                'model_type': 'stream',
+                'threshold': threshold,
+                'version': version,
+                'n_samples': len(rows),
+                'created_at': datetime.now(UTC).isoformat(),
+                'scores_p98': quantile,
+                'outlier_ratio': outlier_ratio,
+            }
+            (models_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
+            logger.info(f"[retrain] Stream HalfSpaceTrees обновлена версия {version} (threshold={threshold:.4f})")
+            used_stream = True
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrain] stream недоступен: {e}; fallback -> stats")
+
+    if used_stream:
+        return version
+
+    # 3. Fallback stats baseline
+    from src.ml.incremental import StatsQuantileBaseline
+    baseline = StatsQuantileBaseline()
+    for r in rows:
+        baseline.update(r)
+    arr = _np.array(baseline.values)
+    med = float(_np.median(arr))
+    mad = float(_np.median(_np.abs(arr - med))) + 1e-9
+    (models_dir / 'stats_state.json').write_text(json.dumps({
+        'z_threshold': baseline.z_threshold,
+        'n_samples': len(arr),
+        'median': med,
+        'mad': mad
+    }, indent=2, ensure_ascii=False), encoding='utf-8')
+    # Для stats используем оценку outlier_ratio как долю значений с z > threshold
+    try:
+        z_scores = _np.abs((arr - med) / (mad if mad != 0 else 1.0))
+        outlier_ratio = float((z_scores > baseline.z_threshold).mean())
+    except Exception:
+        outlier_ratio = None
+    manifest = {
+        'model_type': 'stats',
+        'threshold': baseline.z_threshold,
+        'version': version,
+        'n_samples': len(arr),
+        'created_at': datetime.now(UTC).isoformat(),
+        'median': med,
+        'mad': mad,
+        'outlier_ratio': outlier_ratio
+    }
+    (models_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
+    logger.info(f"[retrain] Stats baseline обновлена версия {version} (z>{baseline.z_threshold})")
+    return version
+
+def load_latest_models() -> Dict[str, object]:
+    """Заглушка загрузки legacy моделей (возвращает пустой словарь)."""
+    return {}
 
 
 class AnomalyModelError(Exception):
@@ -82,79 +213,9 @@ class InsufficientDataError(AnomalyModelError):
     pass
 
 
-# === Minimal MVP function required by contract ===
-async def train_isolation_forest(output_path: Optional[str] = None, n_estimators: int = 100) -> Path:
-    # MVP обучение IsolationForest и сохранение модели (см. шаги в коде)
-    model_dir = Path(output_path) if output_path else (settings.models_path / 'anomaly')
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    stat_cols = [
-        'rms_a','rms_b','rms_c',
-        'crest_a','crest_b','crest_c',
-        'kurt_a','kurt_b','kurt_c',
-        'skew_a','skew_b','skew_c',
-        'mean_a','mean_b','mean_c',
-        'std_a','std_b','std_c',
-        'min_a','min_b','min_c',
-        'max_a','max_b','max_c'
-    ]
-
-    async with get_async_session() as session:
-        from sqlalchemy import select
-        result = await session.execute(select(Feature))
-        rows = result.scalars().all()
-
-    if not rows:
-        raise InsufficientDataError("Нет данных Feature для обучения")
-
-    # Формируем DataFrame
-    import pandas as pd
-    records = []
-    for r in rows:
-        rec = {c: getattr(r, c, None) for c in stat_cols}
-        records.append(rec)
-    df = pd.DataFrame(records)
-
-    # Отбрасываем пустые колонки
-    non_empty = [c for c in stat_cols if c in df.columns and not df[c].isna().all()]
-    if not non_empty:
-        raise InsufficientDataError("Все статистические признаки пусты")
-    df = df[non_empty]
-
-    # Заполняем NaN медианами
-    df = df.fillna(df.median()).fillna(0)
-
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.ensemble import IsolationForest
-
-    scaler = StandardScaler()
-    X = scaler.fit_transform(df.values)
-
-    model = IsolationForest(n_estimators=n_estimators, random_state=42, contamination='auto')
-    model.fit(X)
-
-    # Сохраняем
-    import joblib, json
-    model_path = model_dir / 'isolation_forest_v1.pkl'
-    joblib.dump({'model': model, 'scaler': scaler, 'features': non_empty}, model_path, compress=3)
-
-    manifest_path = model_dir / 'manifest.json'
-    manifest = {}
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-        except Exception:
-            manifest = {}
-    manifest['isolation_forest_v1'] = {
-        'path': str(model_path),
-        'n_features': len(non_empty),
-        'n_estimators': n_estimators,
-    'updated_at': datetime.now(UTC).isoformat()
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
-
-    logger.info(f"IsolationForest модель сохранена: {model_path}")
-    return model_path
+async def train_isolation_forest(*_args, **_kwargs):  # type: ignore
+    """Удалённая функция (raise)."""
+    raise RuntimeError("train_isolation_forest удалён; используйте потоковую anomaly модель.")
 
 
 class FeaturePreprocessor:
@@ -296,47 +357,34 @@ class AnomalyDetectionModels:
     def __init__(self, random_state: int = DEFAULT_RANDOM_STATE):
         self.random_state = random_state
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
-
-        # Модели
-        self.isolation_forest = None
+    # Модели
         self.dbscan = None
         self.pca = None
+        self.incremental_adapter = None  # HalfSpaceTreesIncremental
 
         # Результаты
-        self.isolation_predictions = None
         self.dbscan_labels = None
         self.pca_components = None
 
-    def train_isolation_forest(
-        self,
-        X: np.ndarray,
-        contamination: float = DEFAULT_CONTAMINATION,
-        n_estimators: int = 100
-    ) -> np.ndarray:
-        # Обучить IsolationForest и вернуть предсказания (-1/1)
-        self.logger.info(f"Обучение Isolation Forest (contamination={contamination})")
+    # Legacy IsolationForest удалён.
 
-        self.isolation_forest = IsolationForest(
-            contamination=contamination,
-            n_estimators=n_estimators,
-            random_state=self.random_state,
-            n_jobs=-1
-        )
+    def train_incremental(self, X: np.ndarray, feature_names: List[str]):
+        """Инкрементальная (поточная) модель: HalfSpaceTrees если доступен river.
 
-        # Обучаем и получаем предсказания
-        self.isolation_predictions = self.isolation_forest.fit_predict(X)
-
-        # Вычисляем anomaly scores
-        anomaly_scores = self.isolation_forest.decision_function(X)
-
-        n_anomalies = np.sum(self.isolation_predictions == -1)
-        anomaly_ratio = n_anomalies / len(X)
-
-        self.logger.info(
-            f"Isolation Forest: найдено {n_anomalies} аномалий ({anomaly_ratio:.2%})"
-        )
-
-        return self.isolation_predictions
+        Если библиотека river недоступна, оставляем предупреждение и не инициализируем адаптер.
+        """
+        if RIVER_OK:
+            try:
+                adapter = HalfSpaceTreesIncremental()
+                for row in X:
+                    adapter.learn_one({fn: float(v) for fn, v in zip(feature_names, row)})
+                self.incremental_adapter = adapter
+                self.logger.info("Инкрементальная модель HalfSpaceTrees обучена")
+                return
+            except Exception as e:  # pragma: no cover
+                self.logger.warning(f"HalfSpaceTrees недоступен: {e}")
+        else:
+            self.logger.warning("river недоступен: потоковая модель не инициализирована")
 
     def train_dbscan(
         self,
@@ -402,31 +450,7 @@ class AnomalyDetectionModels:
 
         return self.pca_components
 
-    def get_feature_importance_isolation_forest(self, feature_names: List[str]) -> Dict[str, float]:
-        # Важность признаков IsolationForest
-        if self.isolation_forest is None:
-            raise ValueError("Isolation Forest не обучен")
-
-        # Для Isolation Forest важность вычисляется как средняя глубина разбиения
-        # по каждому признаку во всех деревьях
-        importances = []
-
-        for estimator in self.isolation_forest.estimators_:
-            # Получаем важность признаков для каждого дерева
-            tree_importances = estimator.tree_.compute_feature_importances(normalize=False)
-            importances.append(tree_importances)
-
-        # Усредняем по всем деревьям
-        mean_importances = np.mean(importances, axis=0)
-
-        # Нормализуем
-        if np.sum(mean_importances) > 0:
-            mean_importances = mean_importances / np.sum(mean_importances)
-
-        # Создаем словарь с названиями признаков
-        feature_importance = dict(zip(feature_names, mean_importances))
-
-        return feature_importance
+    # Метод важности IsolationForest удалён.
 
     def get_pca_feature_contribution(self, feature_names: List[str]) -> Dict[str, Dict[str, float]]:
         # Вклад признаков в компоненты PCA
@@ -542,6 +566,39 @@ class AnomalyModelTrainer:
                 f"Загружено {len(df)} записей признаков для обучения"
             )
 
+            # Стратифицированное/ограниченное семплирование для масштабируемости
+            from src.config.settings import get_settings
+            settings_local = get_settings()
+            if settings_local.ANOMALY_TRAIN_SAMPLE_SIZE:
+                target_size = settings_local.ANOMALY_TRAIN_SAMPLE_SIZE
+                if len(df) > target_size:
+                    if settings_local.ANOMALY_TRAIN_STRATIFIED and 'equipment_id' in df.columns:
+                        # Пропорционально количеству записей на оборудование
+                        sampled_frames = []
+                        remaining = target_size
+                        equip_groups = df.groupby('equipment_id')
+                        total = len(df)
+                        for eq, group in equip_groups:
+                            # Минимум 1, пропорционально размеру группы
+                            take = max(1, int(len(group) / total * target_size))
+                            if take > len(group):
+                                take = len(group)
+                            sampled_frames.append(group.sample(n=take, random_state=42))
+                            remaining -= take
+                        if remaining > 0:
+                            # добираем случайными из оставшихся
+                            rest = pd.concat(sampled_frames)
+                            missing = target_size - len(rest)
+                            if missing > 0:
+                                others = df.drop(rest.index)
+                                if len(others) > 0:
+                                    sampled_frames.append(others.sample(n=min(missing, len(others)), random_state=42))
+                        df = pd.concat(sampled_frames).sample(frac=1, random_state=42).reset_index(drop=True)
+                    else:
+                        df = df.sample(n=target_size, random_state=42).reset_index(drop=True)
+
+                    self.logger.info(f"Применено семплирование: использовано {len(df)} записей из {total}")
+
             return df
 
     async def train_models(
@@ -564,12 +621,12 @@ class AnomalyModelTrainer:
         # Обучаем модели
         results = {}
 
-        # 1. Isolation Forest
-        isolation_predictions = self.models.train_isolation_forest(X, contamination)
-        results['isolation_forest'] = {
-            'n_anomalies': int(np.sum(isolation_predictions == -1)),
-            'anomaly_ratio': float(np.sum(isolation_predictions == -1) / len(X))
-        }
+        # 1. Incremental / streaming модель
+        try:
+            self.models.train_incremental(X, feature_names)
+            results['incremental_model'] = 'half_space_trees' if RIVER_OK else 'none'
+        except Exception as e:  # pragma: no cover
+            self.logger.warning(f"Инкрементальная модель не обучена: {e}")
 
         # 2. DBSCAN
         dbscan_labels = self.models.train_dbscan(X)
@@ -604,47 +661,14 @@ class AnomalyModelTrainer:
         return results
 
     def analyze_feature_importance(self, top_n: int = 10) -> Dict:
-        # Анализ важности признаков
-        analysis = {}
-
-        # Важность для Isolation Forest
-        if self.models.isolation_forest is not None:
-            isolation_importance = self.models.get_feature_importance_isolation_forest(
-                self.feature_names
-            )
-
-            # Сортируем по важности
-            sorted_importance = sorted(
-                isolation_importance.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-
-            analysis['isolation_forest'] = {
-                'top_features': sorted_importance[:top_n],
-                'all_features': isolation_importance
-            }
-
-            self.logger.info("Топ-5 признаков для Isolation Forest:")
-            for name, importance in sorted_importance[:5]:
-                self.logger.info(f"  {name}: {importance:.4f}")
-
-        # Вклад в главные компоненты PCA
+        analysis: Dict[str, Dict] = {}
         if self.models.pca is not None:
             pca_contributions = self.models.get_pca_feature_contribution(self.feature_names)
             analysis['pca_contributions'] = pca_contributions
-
-            # Находим признаки с наибольшим вкладом в первую компоненту
-            pc1_contributions = sorted(
-                pca_contributions['PC1'].items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-
+            pc1_contributions = sorted(pca_contributions['PC1'].items(), key=lambda x: x[1], reverse=True)
             self.logger.info("Топ-5 признаков для PC1:")
             for name, contribution in pc1_contributions[:5]:
                 self.logger.info(f"  {name}: {contribution:.4f}")
-
         return analysis
 
     def create_visualizations(self, X: np.ndarray, pca_components: np.ndarray) -> Dict[str, str]:
@@ -658,37 +682,22 @@ class AnomalyModelTrainer:
         # Настройка стиля
         plt.style.use('seaborn-v0_8')
 
-        # 1. PCA scatter plot с результатами Isolation Forest
-        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-
-        # PCA с Isolation Forest
-        colors_if = ['red' if pred == -1 else 'blue' for pred in self.models.isolation_predictions]
-        axes[0].scatter(pca_components[:, 0], pca_components[:, 1], c=colors_if, alpha=0.6)
-        axes[0].set_xlabel(f'PC1 ({self.models.pca.explained_variance_ratio_[0]:.1%} variance)')
-        axes[0].set_ylabel(f'PC2 ({self.models.pca.explained_variance_ratio_[1]:.1%} variance)')
-        axes[0].set_title('PCA + Isolation Forest\n(красные = аномалии)')
-        axes[0].grid(True, alpha=0.3)
-
-        # PCA с DBSCAN
+        # 1. PCA scatter plot: DBSCAN кластеры
+        fig, ax = plt.subplots(figsize=(7, 6))
         unique_labels = set(self.models.dbscan_labels)
         colors_db = plt.cm.Spectral(np.linspace(0, 1, len(unique_labels)))
-
         for k, col in zip(unique_labels, colors_db):
             if k == -1:
-                # Аномалии черным цветом
                 col = [0, 0, 0, 1]
-
             class_member_mask = (self.models.dbscan_labels == k)
             xy = pca_components[class_member_mask]
-
-            axes[1].scatter(xy[:, 0], xy[:, 1], c=[col], alpha=0.6,
-                          label=f'Cluster {k}' if k != -1 else 'Anomalies')
-
-        axes[1].set_xlabel(f'PC1 ({self.models.pca.explained_variance_ratio_[0]:.1%} variance)')
-        axes[1].set_ylabel(f'PC2 ({self.models.pca.explained_variance_ratio_[1]:.1%} variance)')
-        axes[1].set_title('PCA + DBSCAN')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
+            ax.scatter(xy[:, 0], xy[:, 1], c=[col], alpha=0.6,
+                       label=f'Cluster {k}' if k != -1 else 'Anomalies')
+        ax.set_xlabel(f'PC1 ({self.models.pca.explained_variance_ratio_[0]:.1%} variance)')
+        ax.set_ylabel(f'PC2 ({self.models.pca.explained_variance_ratio_[1]:.1%} variance)')
+        ax.set_title('PCA + DBSCAN')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
         pca_path = viz_dir / f"pca_analysis_{timestamp}.png"
@@ -696,62 +705,24 @@ class AnomalyModelTrainer:
         plt.close()
         paths['pca_analysis'] = str(pca_path)
 
-        # 2. Feature importance для Isolation Forest
-        if hasattr(self, 'feature_names') and self.models.isolation_forest is not None:
-            importance_dict = self.models.get_feature_importance_isolation_forest(self.feature_names)
-
-            # Сортируем и берем топ-15
-            sorted_features = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:15]
-
-            fig, ax = plt.subplots(figsize=(10, 8))
-
-            features, importances = zip(*sorted_features)
-            y_pos = np.arange(len(features))
-
-            bars = ax.barh(y_pos, importances)
-            ax.set_yticks(y_pos)
-            ax.set_yticklabels(features)
-            ax.invert_yaxis()
-            ax.set_xlabel('Feature Importance')
-            ax.set_title('Top 15 Features - Isolation Forest Importance')
-            ax.grid(True, alpha=0.3)
-
-            # Добавляем значения на барах
-            for i, (bar, importance) in enumerate(zip(bars, importances)):
-                ax.text(importance + 0.001, bar.get_y() + bar.get_height()/2,
-                       f'{importance:.3f}', va='center', fontsize=8)
-
-            plt.tight_layout()
-            importance_path = viz_dir / f"feature_importance_{timestamp}.png"
-            plt.savefig(importance_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            paths['feature_importance'] = str(importance_path)
-
-        # 3. Распределение аномалий по времени
+        # 2. Распределение аномалий (DBSCAN) по времени
         if self.training_data is not None:
             fig, ax = plt.subplots(figsize=(12, 6))
 
             # Добавляем метки аномалий к данным
             df_viz = self.training_data.copy()
-            df_viz['is_anomaly_if'] = self.models.isolation_predictions == -1
             df_viz['is_anomaly_db'] = self.models.dbscan_labels == -1
 
             # Группируем по часам и считаем аномалии
             df_viz['hour'] = pd.to_datetime(df_viz['window_start']).dt.floor('h')
 
             hourly_stats = df_viz.groupby('hour').agg({
-                'is_anomaly_if': ['sum', 'count'],
                 'is_anomaly_db': 'sum'
             }).reset_index()
-
-            hourly_stats.columns = ['hour', 'anomalies_if', 'total_samples', 'anomalies_db']
-            hourly_stats['anomaly_rate_if'] = hourly_stats['anomalies_if'] / hourly_stats['total_samples']
-            hourly_stats['anomaly_rate_db'] = hourly_stats['anomalies_db'] / hourly_stats['total_samples']
-
-            ax.plot(hourly_stats['hour'], hourly_stats['anomaly_rate_if'],
-                   label='Isolation Forest', marker='o', alpha=0.7)
-            ax.plot(hourly_stats['hour'], hourly_stats['anomaly_rate_db'],
-                   label='DBSCAN', marker='s', alpha=0.7)
+            hourly_stats.columns = ['hour', 'anomalies_db']
+            total_samples = df_viz.groupby('hour').size().reindex(hourly_stats['hour']).values
+            anomaly_rate_db = hourly_stats['anomalies_db'] / total_samples
+            ax.plot(hourly_stats['hour'], anomaly_rate_db, label='DBSCAN', marker='s', alpha=0.7)
 
             ax.set_xlabel('Время')
             ax.set_ylabel('Доля аномалий')
@@ -780,10 +751,10 @@ class AnomalyModelTrainer:
 
         # Сохраняем модели
         models_to_save = {
-            'isolation_forest': self.models.isolation_forest,
             'dbscan': self.models.dbscan,
             'pca': self.models.pca,
-            'preprocessor': self.preprocessor
+            'preprocessor': self.preprocessor,
+            'incremental': self.models.incremental_adapter
         }
 
         for model_name, model in models_to_save.items():
@@ -798,10 +769,6 @@ class AnomalyModelTrainer:
             'created_at': datetime.now().isoformat(),
             'model_type': 'anomaly_detection',
             'models': {
-                'isolation_forest': {
-                    'contamination': getattr(self.models.isolation_forest, 'contamination', None),
-                    'n_estimators': getattr(self.models.isolation_forest, 'n_estimators', None)
-                },
                 'dbscan': {
                     'eps': getattr(self.models.dbscan, 'eps', None),
                     'min_samples': getattr(self.models.dbscan, 'min_samples', None)
@@ -889,10 +856,6 @@ if __name__ == "__main__":
 
             logger.info("Обучение завершено успешно")
             logger.info(f"Версия модели: {results['model_version']}")
-            logger.info(
-                f"Isolation Forest: {results['isolation_forest']['n_anomalies']} аномалий "
-                f"({results['isolation_forest']['anomaly_ratio']:.1%})"
-            )
             logger.info(
                 f"DBSCAN: {results['dbscan']['n_clusters']} кластеров, "
                 f"{results['dbscan']['n_anomalies']} аномалий"

@@ -1,0 +1,21 @@
+defects:
+  - defect_id: IMB001
+    name: Imbalance
+    description: Дисбаланс ротора или вращающихся масс.
+    severity_levels: [low, medium, high]
+  - defect_id: MIS001
+    name: Misalignment
+    description: Несоосность валов (горизонтальная/угловая).
+    severity_levels: [low, medium, high, critical]
+  - defect_id: BRG001
+    name: Bearing Wear
+    description: Износ подшипников (внешнее/внутреннее кольцо, тела качения).
+    severity_levels: [low, medium, high, critical]
+  - defect_id: LUB001
+    name: Lubrication Issue
+    description: Недостаточная или избыточная смазка подшипника.
+    severity_levels: [low, medium, high]
+  - defect_id: ELE001
+    name: Electrical Fault
+    description: Электрические неисправности (статор, ротор, несимметрия фаз).
+    severity_levels: [medium, high, critical]

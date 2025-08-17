@@ -54,9 +54,10 @@ class DataValidator:  # Основной валидатор
 
     # Проверка фаз
         for phase_name, values in phase_data.items():
-            if values:  # Проверяем только если есть данные
+            if values:  # преобразуем None -> np.nan
+                norm = [np.nan if (v is None) else v for v in values]
                 phase_results = self._validate_phase_data(
-                    np.array(values), phase_name, filename
+                    np.array(norm, dtype=float), phase_name, filename
                 )
                 results.extend(phase_results)
 
@@ -93,24 +94,28 @@ class DataValidator:  # Основной валидатор
         phase_name: str,
         filename: str
     ) -> List[ValidationResult]:
-        """Валидировать данные одной фазы"""
-        results = []
+        """Валидировать данные одной фазы."""
+        results: List[ValidationResult] = []
 
-    # Длина сигнала (<=10 умеренно короткий — WARNING)
-        if len(phase_values) < self.min_signal_length:
+        # Длина сигнала (<=10 умеренно короткий — WARNING)
+        length = len(phase_values)
+        if length < self.min_signal_length:
             severity = ValidationSeverity.ERROR
-            if len(phase_values) >= 3 and len(phase_values) <= 10:
-                # Смягчаем до WARNING чтобы unit тест с 3 строками не помечал сигнал как FAILED
+            if 3 <= length <= 10:
                 severity = ValidationSeverity.WARNING
             results.append(ValidationResult(
                 severity=severity,
-                message=f"Слишком короткий сигнал фазы {phase_name}: {len(phase_values)} отсчетов",
-                details={"phase": phase_name, "length": len(phase_values), "min_required": self.min_signal_length, "softened": severity == ValidationSeverity.WARNING}
+                message=f"Слишком короткий сигнал фазы {phase_name}: {length} отсчетов",
+                details={"phase": phase_name, "length": length, "min_required": self.min_signal_length, "softened": severity == ValidationSeverity.WARNING}
             ))
 
-    # Доля NaN
-        nan_count = np.sum(np.isnan(phase_values))
-        nan_ratio = nan_count / len(phase_values)
+        if length == 0:
+            return results
+
+        # Доля NaN
+        nan_mask = np.isnan(phase_values)
+        nan_count = int(np.sum(nan_mask))
+        nan_ratio = nan_count / length
 
         if nan_ratio > self.max_nan_ratio:
             results.append(ValidationResult(
@@ -125,29 +130,25 @@ class DataValidator:  # Основной валидатор
                 details={"phase": phase_name, "nan_ratio": nan_ratio}
             ))
 
-    # Амплитуды (по валидным значениям)
-        valid_values = phase_values[~np.isnan(phase_values)]
-
-        if len(valid_values) > 0:
-            max_abs_value = np.max(np.abs(valid_values))
-
+        # Амплитуды (по валидным значениям)
+        if nan_count < length:
+            valid_values = phase_values[~nan_mask]
+            max_abs_value = float(np.max(np.abs(valid_values))) if valid_values.size else 0.0
             if max_abs_value > self.max_current_amplitude:
                 results.append(ValidationResult(
                     severity=ValidationSeverity.ERROR,
                     message=f"Слишком большая амплитуда тока в фазе {phase_name}: {max_abs_value:.2f} А",
                     details={"phase": phase_name, "max_amplitude": max_abs_value}
                 ))
-
-            # Проверка постоянной составляющей
-            mean_value = np.mean(valid_values)
-            std_value = np.std(valid_values)
-
-            if std_value < 0.01 * abs(mean_value):
-                results.append(ValidationResult(
-                    severity=ValidationSeverity.WARNING,
-                    message=f"Подозрительно малые колебания в фазе {phase_name}",
-                    details={"phase": phase_name, "mean": mean_value, "std": std_value}
-                ))
+            if valid_values.size:
+                mean_value = float(np.mean(valid_values))
+                std_value = float(np.std(valid_values))
+                if std_value < 0.01 * abs(mean_value):
+                    results.append(ValidationResult(
+                        severity=ValidationSeverity.WARNING,
+                        message=f"Подозрительно малые колебания в фазе {phase_name}",
+                        details={"phase": phase_name, "mean": mean_value, "std": std_value}
+                    ))
 
         return results
 
@@ -192,10 +193,10 @@ class DataValidator:  # Основной валидатор
                         details={'phase': phase_name}
                     ))
                 else:
-                    arr = np.array(values)
+                    arr_raw = [np.nan if v is None else v for v in values]
+                    arr = np.array(arr_raw, dtype=float)
                     if arr.size > 0:
                         nan_ratio = np.sum(np.isnan(arr)) / arr.size
-                        # Фаза частично пустая — это уже обрабатывается в _validate_phase_data (>0.1). Здесь мягкое предупреждение для <=0.1 но >0
                         if 0 < nan_ratio <= 0.1:
                             results.append(ValidationResult(
                                 severity=ValidationSeverity.WARNING,

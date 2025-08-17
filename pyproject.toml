@@ -47,6 +47,7 @@ dependencies = [
     "xgboost>=2.0.2",
     "statsmodels>=0.14.0",
     "prophet>=1.1.5",
+    "torch>=2.2.0",
 
     # Signal Processing
     "librosa>=0.10.1",

@@ -15,7 +15,8 @@ _EXPORTED = [
 	'decompress_signal_data', 'compress_and_store_results',
 	'_prepare_feature_vector', '_update_signal_status', 'get_async_session',
 	# Patch targets
-	'FeatureExtractor', 'load_latest_models_async', 'RMSTrendForecaster'
+	'FeatureExtractor', 'load_latest_models_async', 'RMSTrendForecaster',
+	'clustering_pipeline', 'run_clustering_async'
 ]
 
 _TASKS_FILE_MODULE: Optional[ModuleType] = None

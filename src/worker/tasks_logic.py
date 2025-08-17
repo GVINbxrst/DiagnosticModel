@@ -19,6 +19,7 @@ from src.database.models import (
     ProcessingStatus
 )
 from src.data_processing.feature_extraction import FeatureExtractor
+from src.worker.processing_core import process_raw_core, _update_signal_status as core_update_status
 from src.ml.train import load_latest_models
 from src.ml.forecasting import RMSTrendForecaster
 from src.utils.logger import get_logger, get_audit_logger
@@ -57,51 +58,25 @@ async def compress_and_store_results(data: Any) -> bytes:
         logger.error(f"Ошибка сжатия результатов: {e}")
         raise
 
-@_observe_latency('worker_task_duration_seconds', labels={'task_name':'process_raw'})
+@_observe_latency('worker_task_duration_seconds', labels={'task_name': 'process_raw'})
 @celery_app.task(bind=True, base=DatabaseTask, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60}, retry_backoff=True, retry_jitter=True)
-def process_raw(self, raw_id: str) -> Dict:
+def process_raw(self, raw_id: str) -> Dict:  # type: ignore
     task_start = datetime.now(UTC)
     try:
-        result = asyncio.run(_process_raw_async(raw_id))
+        result = asyncio.run(process_raw_core(raw_id))
         result['processing_time_seconds'] = (datetime.now(UTC) - task_start).total_seconds()
         return result
-    except Exception as exc:
-        asyncio.run(_update_signal_status(raw_id, ProcessingStatus.FAILED, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        asyncio.run(core_update_status(raw_id, ProcessingStatus.FAILED, str(exc)))
         if self.request.retries < self.max_retries:
             raise self.retry(countdown=60 * (self.request.retries + 1))
         raise
 
-async def _process_raw_async(raw_id: str) -> Dict:
-    async with get_async_session() as session:
-        q = select(RawSignal).where(RawSignal.id == UUID(raw_id))
-        res = await session.execute(q)
-        raw_signal = res.scalar_one_or_none()
-        if not raw_signal:
-            raise ValueError("raw signal not found")
-        if raw_signal.processing_status in {ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING}:
-            return {'status': 'skipped', 'raw_signal_id': raw_id}
-        await _update_signal_status(raw_id, ProcessingStatus.PROCESSING)
-        phase_data = {}
-        if raw_signal.phase_a: phase_data['phase_a'] = await decompress_signal_data(raw_signal.phase_a)
-        if raw_signal.phase_b: phase_data['phase_b'] = await decompress_signal_data(raw_signal.phase_b)
-        if raw_signal.phase_c: phase_data['phase_c'] = await decompress_signal_data(raw_signal.phase_c)
-        if not phase_data:
-            raise ValueError("Нет данных ни для одной фазы")
-        extractor = FeatureExtractor(sample_rate=raw_signal.sample_rate_hz or 25600)
-        feature_ids = await extractor.process_raw_signal(raw_signal_id=UUID(raw_id), window_duration_ms=1000, overlap_ratio=0.5)
-        await _update_signal_status(raw_id, ProcessingStatus.COMPLETED)
-        return {'status':'success','raw_signal_id':raw_id,'feature_ids':[str(fid) for fid in feature_ids]}
+async def _process_raw_async(raw_id: str) -> Dict:  # backward compat if imported elsewhere
+    return await process_raw_core(raw_id)
 
 async def _update_signal_status(raw_id: str, status: ProcessingStatus, error: str | None = None):
-    async with get_async_session() as session:
-        q = select(RawSignal).where(RawSignal.id == UUID(raw_id))
-        res = await session.execute(q)
-        raw = res.scalar_one_or_none()
-        if raw:
-            raw.processing_status = status
-            if status == ProcessingStatus.FAILED:
-                raw.meta = (raw.meta or {}) | {'error': error}
-            await session.commit()
+    await core_update_status(raw_id, status, error)
 
 # Лишние задачи / функции вырезаны для краткости — восстановить при необходимости.
 

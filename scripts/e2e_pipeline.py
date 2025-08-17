@@ -23,7 +23,7 @@ from src.database.models import (
     RawSignal, Feature, Prediction, Equipment, EquipmentStatus, ProcessingStatus, EquipmentType
 )
 from src.worker.tasks import _process_raw_async, _detect_anomalies_async, _forecast_trend_async
-from src.ml.train import load_latest_models, train_isolation_forest, train_anomaly_models  # type: ignore
+from src.ml.train import train_anomaly_models  # type: ignore
 from src.utils.logger import get_logger
 from src.data_processing.csv_loader import CSVLoader
 
@@ -32,19 +32,18 @@ logger = get_logger(__name__)
 
 # ---------------- Model -----------------
 async def ensure_model(full: bool = False) -> None:
-    models = load_latest_models()
-    if models:
-        logger.info("Модели найдены (legacy manifest) — обучение пропущено")
-        return
+    """Упрощённый ensure_model: выполняет обучение актуальных anomaly моделей один раз.
+
+    Legacy IsolationForest удалён; вызываем только train_anomaly_models при full=True.
+    """
     if full:
-        logger.info("Запуск полного обучения anomaly моделей (IsolationForest + DBSCAN + PCA)")
         try:
             await train_anomaly_models(output_dir=None)
-            return
+            logger.info("Актуальные anomaly модели обучены")
         except Exception as e:  # pragma: no cover
-            logger.warning(f"Полное обучение не удалось, fallback: {e}")
-    logger.info("Fallback: обучение минимальной IsolationForest модели")
-    await train_isolation_forest()
+            logger.warning(f"Обучение anomaly моделей не удалось: {e}")
+    else:
+        logger.info("full флаг не установлен – пропуск обучения (ожидается потоковая модель)")
 
 
 # --------------- Queries -----------------

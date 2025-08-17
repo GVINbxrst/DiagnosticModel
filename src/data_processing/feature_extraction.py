@@ -440,6 +440,8 @@ class FeatureExtractor:
         self.statistical_extractor = StatisticalFeatureExtractor()
         self.frequency_extractor = FrequencyFeatureExtractor(sample_rate)
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        from src.config.settings import get_settings
+        self.settings = get_settings()
 
     def extract_features_from_phases(
         self,
@@ -606,44 +608,85 @@ class FeatureExtractor:
                 await session.commit()
                 return [feature_id]
 
-            # Обрабатываем по окнам
-            feature_ids = []
-
+            # Подготавливаем список окон
+            windows: list[tuple[int,int,datetime,datetime]] = []
             for start_sample in range(0, max_length - samples_per_window + 1, hop_size):
                 end_sample = start_sample + samples_per_window
+                start_time = raw_signal.recorded_at + timedelta(seconds=start_sample / self.sample_rate)
+                end_time = raw_signal.recorded_at + timedelta(seconds=end_sample / self.sample_rate)
+                windows.append((start_sample, end_sample, start_time, end_time))
 
-                # Извлекаем сегменты для каждой фазы
-                segment_a = phase_a[start_sample:end_sample] if phase_a is not None else None
-                segment_b = phase_b[start_sample:end_sample] if phase_b is not None else None
-                segment_c = phase_c[start_sample:end_sample] if phase_c is not None else None
+            feature_ids: list[UUID] = []
 
-                # Вычисляем временные метки
-                start_time = raw_signal.recorded_at + timedelta(
-                    seconds=start_sample / self.sample_rate
-                )
-                end_time = raw_signal.recorded_at + timedelta(
-                    seconds=end_sample / self.sample_rate
-                )
+            # Порог для параллельной обработки
+            parallel_enabled = (
+                self.settings.FEATURE_EXTRACTION_PARALLEL and
+                len(windows) >= self.settings.FEATURE_PARALLEL_MIN_WINDOWS and
+                self.settings.FEATURE_EXTRACTION_WORKERS > 1
+            )
 
+            if parallel_enabled:
                 try:
-                    # Извлекаем признаки
-                    features = self.extract_features_from_phases(
-                        segment_a, segment_b, segment_c, start_time, end_time
-                    )
+                    from concurrent.futures import ProcessPoolExecutor, as_completed
+                    import math
 
-                    # Сохраняем в базу данных
-                    feature_id = await self._save_features_to_db(
-                        session, raw_signal_id, features, start_time, end_time
-                    )
+                    # Функция для обработки одного окна (вынесена внутрь чтобы иметь доступ к сериализованным массивам)
+                    def _process_window(args):  # type: ignore
+                        (start_sample_l, end_sample_l, start_time_l, end_time_l, phase_a_bytes, phase_b_bytes, phase_c_bytes, sample_rate_l) = args
+                        from src.utils.serialization import load_float32_array
+                        phase_a_l = load_float32_array(phase_a_bytes) if phase_a_bytes else None
+                        phase_b_l = load_float32_array(phase_b_bytes) if phase_b_bytes else None
+                        phase_c_l = load_float32_array(phase_c_bytes) if phase_c_bytes else None
+                        segment_a_l = phase_a_l[start_sample_l:end_sample_l] if phase_a_l is not None else None
+                        segment_b_l = phase_b_l[start_sample_l:end_sample_l] if phase_b_l is not None else None
+                        segment_c_l = phase_c_l[start_sample_l:end_sample_l] if phase_c_l is not None else None
+                        # Локальные экземпляры для чистоты (не использовать self внутри процесса)
+                        fe_loc = FeatureExtractor(sample_rate_l)
+                        return (start_sample_l, end_sample_l, start_time_l, end_time_l, fe_loc.extract_features_from_phases(segment_a_l, segment_b_l, segment_c_l, start_time_l, end_time_l))
 
-                    feature_ids.append(feature_id)
+                    # Сериализуем исходные compressed bytes чтобы дети сами распаковали (минимизируем передачу больших numpy)
+                    phase_a_bytes = raw_signal.phase_a
+                    phase_b_bytes = raw_signal.phase_b
+                    phase_c_bytes = raw_signal.phase_c
+                    tasks_args = [
+                        (s, e, st, et, phase_a_bytes, phase_b_bytes, phase_c_bytes, self.sample_rate)
+                        for (s, e, st, et) in windows
+                    ]
+                    self.logger.info(f"Параллельная обработка {len(tasks_args)} окон c {self.settings.FEATURE_EXTRACTION_WORKERS} воркерами")
+                    with ProcessPoolExecutor(max_workers=self.settings.FEATURE_EXTRACTION_WORKERS) as pool:
+                        futures = [pool.submit(_process_window, t) for t in tasks_args]
+                        for fut in as_completed(futures):
+                            try:
+                                start_sample_r, end_sample_r, start_time_r, end_time_r, features = fut.result()
+                                feature_id = await self._save_features_to_db(session, raw_signal_id, features, start_time_r, end_time_r)
+                                feature_ids.append(feature_id)
+                            except Exception as e:
+                                self.logger.warning(f"Окно {e} не обработано (parallel)")
+                except Exception as e:
+                    self.logger.warning(f"Ошибка параллельной обработки, fallback на последовательную: {e}")
+                    parallel_enabled = False
 
-                except InsufficientDataError as e:
-                    self.logger.warning(f"Пропускаем окно {start_sample}-{end_sample}: {e}")
-                    continue
+            if not parallel_enabled:
+                for (start_sample, end_sample, start_time, end_time) in windows:
+                    segment_a = phase_a[start_sample:end_sample] if phase_a is not None else None
+                    segment_b = phase_b[start_sample:end_sample] if phase_b is not None else None
+                    segment_c = phase_c[start_sample:end_sample] if phase_c is not None else None
+                    try:
+                        features = self.extract_features_from_phases(segment_a, segment_b, segment_c, start_time, end_time)
+                        feature_id = await self._save_features_to_db(session, raw_signal_id, features, start_time, end_time)
+                        feature_ids.append(feature_id)
+                    except InsufficientDataError as e:
+                        self.logger.warning(f"Пропускаем окно {start_sample}-{end_sample}: {e}")
+                        continue
 
             # Помечаем сырой сигнал как обработанный
             raw_signal.processed = True
+
+            # Опционально очищаем сырые данные для экономии места
+            if not self.settings.RETAIN_RAW_SIGNALS:
+                raw_signal.phase_a = None
+                raw_signal.phase_b = None
+                raw_signal.phase_c = None
 
             await session.commit()
 
@@ -717,6 +760,55 @@ class FeatureExtractor:
             await add_res
         await session.flush()
 
+        # Почасовая агрегация (после flush есть feature_record.id). Выполняем только если включено.
+        if getattr(self.settings, 'FEATURE_SUMMARY_ENABLED', False):
+            try:
+                from sqlalchemy import select
+                from src.database.models import RawSignal, HourlyFeatureSummary  # type: ignore
+                from src.utils.feature_store import get_feature_store  # поздний импорт
+                # Получаем raw сигнал (для equipment_id)
+                raw_signal = await session.get(RawSignal, feature_record.raw_id)
+                if raw_signal:
+                    hour_start = feature_record.window_start.replace(minute=0, second=0, microsecond=0)
+                    # Собираем RMS значения
+                    vals = [v for v in [feature_record.rms_a, feature_record.rms_b, feature_record.rms_c] if v is not None]
+                    if vals:
+                        rms_mean = float(sum([float(v) for v in vals]) / len(vals))
+                        # Асинхронно кладём значение в feature store (не критично для транзакции)
+                        try:  # pragma: no cover - best effort
+                            store = await get_feature_store()
+                            await store.store_rms(raw_signal.equipment_id, feature_record.window_start, rms_mean)
+                        except Exception as fe:
+                            self.logger.debug(f"FeatureStore store_rms fail: {fe}")
+                        existing_q = await session.execute(
+                            select(HourlyFeatureSummary).where(
+                                HourlyFeatureSummary.equipment_id == raw_signal.equipment_id,
+                                HourlyFeatureSummary.hour_start == hour_start
+                            )
+                        )
+                        row = existing_q.scalar_one_or_none()
+                        if row:
+                            # Инкрементальное среднее
+                            prev_samples = row.samples or 0
+                            if prev_samples:
+                                row.rms_mean = float(((row.rms_mean or 0) * prev_samples + rms_mean) / (prev_samples + 1))
+                            else:
+                                row.rms_mean = rms_mean
+                            row.rms_max = max(float(row.rms_max or rms_mean), rms_mean)
+                            row.rms_min = min(float(row.rms_min or rms_mean), rms_mean)
+                            row.samples = prev_samples + 1
+                        else:
+                            session.add(HourlyFeatureSummary(
+                                equipment_id=raw_signal.equipment_id,
+                                hour_start=hour_start,
+                                rms_mean=rms_mean,
+                                rms_max=rms_mean,
+                                rms_min=rms_mean,
+                                samples=1
+                            ))
+            except Exception as aggr_err:  # не прерываем основную обработку
+                self.logger.warning(f"Не удалось обновить HourlyFeatureSummary: {aggr_err}")
+
         return feature_record.id
 
     def _prepare_fft_spectrum_for_db(self, features: Dict) -> Dict:
@@ -781,24 +873,31 @@ async def process_unprocessed_signals(
 
         logger.info(f"Найдено {len(unprocessed_signals)} необработанных сигналов")
 
-        for raw_signal in unprocessed_signals:
-            try:
-                feature_ids = await feature_extractor.process_raw_signal(
-                    raw_signal.id,
-                    window_duration_ms=window_duration_ms,
-                    overlap_ratio=overlap_ratio
-                )
+        # Ограничение конкуренции
+        from src.config.settings import get_settings
+        import asyncio
+        settings = get_settings()
+        max_concurrent = max(1, settings.MAX_CONCURRENT_FILES)
+        sem = asyncio.Semaphore(max_concurrent)
 
-                stats['processed_signals'] += 1
-                stats['created_features'] += len(feature_ids)
+        async def _process_one(raw_signal):
+            nonlocal stats
+            async with sem:
+                try:
+                    feature_ids = await feature_extractor.process_raw_signal(
+                        raw_signal.id,
+                        window_duration_ms=window_duration_ms,
+                        overlap_ratio=overlap_ratio
+                    )
+                    stats['processed_signals'] += 1
+                    stats['created_features'] += len(feature_ids)
+                    logger.info(f"Обработан сигнал {raw_signal.id}: создано {len(feature_ids)} признаков")
+                except Exception as e:
+                    logger.error(f"Ошибка обработки сигнала {raw_signal.id}: {e}")
+                    stats['errors'] += 1
 
-                logger.info(
-                    f"Обработан сигнал {raw_signal.id}: создано {len(feature_ids)} признаков"
-                )
-
-            except Exception as e:
-                logger.error(f"Ошибка обработки сигнала {raw_signal.id}: {e}")
-                stats['errors'] += 1
+        # Запускаем задачи параллельно с ограничением
+        await asyncio.gather(*[_process_one(rs) for rs in unprocessed_signals])
 
     return stats
 

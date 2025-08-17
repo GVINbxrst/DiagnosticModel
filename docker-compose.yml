@@ -7,8 +7,8 @@ services:
     container_name: diagmod_postgres
     environment:
       POSTGRES_DB: diagmod
-      POSTGRES_USER: diagmod_user
-      POSTGRES_PASSWORD: diagmod_password
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -16,13 +16,14 @@ services:
       - ./sql/views:/docker-entrypoint-initdb.d/02-views:ro
       - ./sql/procedures:/docker-entrypoint-initdb.d/03-procedures:ro
       - ./sql/seed:/docker-entrypoint-initdb.d/04-seed:ro
+      - ./sql/schema/004_add_new_entities.sql:/docker-entrypoint-initdb.d/05-additions.sql:ro
       - ./configs/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     ports:
       - "5432:5432"
     networks:
       - diagmod_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U diagmod_user -d diagmod"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d diagmod"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -76,7 +77,7 @@ services:
       target: production
     container_name: diagmod_api
     environment:
-      - DATABASE_URL=postgresql+asyncpg://diagmod_user:diagmod_password@postgres:5432/diagmod
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/diagmod
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
@@ -85,6 +86,9 @@ services:
       - LOG_LEVEL=INFO
       - PROMETHEUS_ENABLED=true
       - PROMETHEUS_PORT=8001
+      - CSV_BATCH_SIZE=50000
+      - FEATURE_SUMMARY_ENABLED=true
+      - FEATURE_STORE_BACKEND=db
     volumes:
       - ./data:/app/data
       - ./models:/app/models
@@ -124,13 +128,16 @@ services:
       target: production
     container_name: diagmod_worker
     environment:
-      - DATABASE_URL=postgresql+asyncpg://diagmod_user:diagmod_password@postgres:5432/diagmod
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/diagmod
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
       - CELERY_WORKER_CONCURRENCY=4
       - CELERY_WORKER_PREFETCH_MULTIPLIER=1
       - LOG_LEVEL=INFO
+      - CSV_BATCH_SIZE=50000
+      - FEATURE_SUMMARY_ENABLED=true
+      - FEATURE_STORE_BACKEND=db
     volumes:
       - ./data:/app/data
       - ./models:/app/models

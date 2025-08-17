@@ -1,0 +1,327 @@
+Общая интеграционная готовность (оценка возможности запуска полного контура): ~78%
+
+1. База данных / Схема / Партиционирование – 85%
+
+Есть базовые SQL (001–004) и новый 005_partitioning.sql + ensure_partitions.py.
+Почасовые агрегаты и новые сущности добавлены.
+Риск: скрипт 005 «перепаковывает» таблицы (RENAME/INSERT) — при больших объёмах возможен долгий простой и блокировки. Нет миграций Alembic. Для 100%:
+Переписать 005 на стратегию: CREATE PARTITIONED TABLE + ATTACH EXISTING PARTITIONS без полного копирования (или использовать pg_redefine).
+Ввести Alembic миграции (автоген + ручные) и зафиксировать ревизию.
+Тест производительности INSERT/SELECT после партиционирования + индексы на часто фильтруемые поля (prediction.created_at, feature.window_start).
+
+Статус выполнения:
+1) Инициализирован Alembic (добавлены alembic/env.py, alembic.ini, README) – базовый шаг выполнен.
+2) Пока НЕ переписан скрипт 005_partitioning на стратегию ATTACH EXISTING (осталось): требуются изменения без копирования данных.
+3) Не добавлены дополнительные индексы по prediction.created_at (в models есть индекс по equipment_id, created_at для forecasts/anomaly_scores; для prediction таблицы индексы частично покрывают, но можно добавить составной при необходимости) – отложено.
+4) Тест производительности не выполнен (переносим ближе к пункту 14 тесты).
+
+Итог по пункту 1: Частично завершён (Alemic scaffold готов). Следующий логический подшаг – рефактор 005 без копирования данных и автогенерация baseline ревизии (можно сделать позже блоком вместе с докой в пункте 15). Предлагаю перейти к пункту 2 (Feature Store), так как критический блок (отсутствие Alembic) смягчён наличием scaffolding. Вернёмся для доработки ATTACH/ревизии после стабилизации API/Worker.
+
+2. Feature Store / Почасовые агрегаты – 80%
+
+Реализован db/redis backend, запись RMS при сохранении признаков.
+Нет unit/integration тестов get_recent_rms / store_rms.
+Нет переключения backend через переменную в docker-compose примерах.
+Нет TTL/очистки для redis варианта. Для 100%:
+Добавить тесты (db backend: вставить фичи → сверить последовательность).
+Документировать FEATURE_STORE_BACKEND в README (таблица environment vars).
+Добавить опцию MAX_POINTS в settings.
+Метрика hit/miss Prometheus.
+
+Статус выполнения (п.2):
+ - Добавлен параметр MAX_FEATURE_STORE_POINTS в settings.
+ - Добавлены метрики feature_store_hit_total / feature_store_miss_total.
+ - README дополнен параметрами и метриками Feature Store.
+ - Redis backend теперь использует MAX_FEATURE_STORE_POINTS и фиксирует hit/miss.
+ - DB backend также инкрементирует hit/miss.
+Осталось для 100%: тесты (отложены до пункта 14), TTL/очистка для Redis (ещё не реализовано), переменная в docker-compose для MAX_FEATURE_STORE_POINTS (можно добавить позже вместе с таблицей ENV VARS).
+
+
+3. API (FastAPI) – 82%
+
+Основные роуты, health, auth, anomalies, signals, новые forecast_rms и sequence_risk.
+Несоответствие пути прогноза RMS в Dashboard: в коде страница использует /api/v1/anomalies/forecast_rms/{id}, эндпоинт реально /api/v1/forecast_rms/{id}.
+Дублирование celery_app (см. ниже) не отражено в API docs (OpenAPI не включает Celery задачи).
+Админские эндпоинты user management, security из AdminPage не видны в коде (ожидаются /admin/users etc.) → потенциально отсутствуют. Для 100%:
+Исправить путь в trends.py или сделать алиас /anomalies/forecast_rms/... в anomalies router.
+Реализовать/подтвердить админ эндпоинты (users list/create, metrics security settings) или скрыть функционал на UI пока.
+Тесты на новые эндпоинты (HTTP 200 / 400 insuff data / 500 fallback).
+
+Статус выполнения (п.3):
+ - Добавлен алиас эндпоинта: /api/v1/anomalies/forecast_rms/{equipment_id} (не отображается в схеме) к /api/v1/forecast_rms/{equipment_id}.
+ - Dashboard `trends.py` переключён на канонический путь и содержит fallback на старый.
+ - Подтверждено наличие admin_security эндпоинтов (файл admin_security.py подключён через __init__). Экспорт router обновлён.
+ - Админские user endpoints (`/admin/users`) всё ещё отсутствуют в API (только security/audit). Нужно: либо реализовать CRUD пользователей (GET/POST /admin/users), либо скрыть UI части (будет решено в пункте 10 или 13).
+Осталось: реализовать/убрать user management эндпоинты; тесты (п.14); persistence forecast_rms (перейдёт в п.8).
+
+
+4. Worker / Celery – 70%
+
+tasks.py, specialized_tasks.py, core_tasks.py, config.py – есть функционал обработки/анализ/прогноз.
+Дублирование определения celery_app (config.py vs новый init.py) → риск расхождения периодических задач (ensure_partitions зарегистрирован не там, откуда запускается worker).
+Периодическая задача ensure_partitions использует celery_app из init, но запуск вероятно идёт из src.worker.config:celery_app.
+Нет beat_schedule для других maintenance задач (очистка старых данных, ретрейн). Для 100%:
+Консолидировать celery_app в одном файле (config.py), перенести setup_periodic_tasks туда.
+Добавить health task + метрику количества активных воркеров.
+Тест на idempotent вызов ensure_partitions.
+
+Статус выполнения (п.4):
+ - Удалён дублирующий celery_app из `src/worker/__init__.py` (оставлена только обёртка импорта).
+ - Периодическая задача ensure_partitions перенесена в `config.py` + добавлен health.ping task.
+ - Добавлена задача `maintenance.ensure_partitions` с on_after_configure планированием (ежедневно).
+ - Консолидация точек входа: теперь использовать `celery -A src.worker.config worker` или модульный импорт через `src.worker`.
+Осталось: тест идемпотентности ensure_partitions (перенос в п.14), возможно добавить beat service в docker-compose (п.16).
+
+
+5. Data Processing / Feature Extraction – 88%
+
+Параллельные окна, агрегация Hourly, очистка сырых сигналов опционально.
+Нет graceful backpressure (ограничение одновременно обрабатываемых крупных файлов).
+Нет интеграционного теста «большой CSV -> N features -> hourly summary». Для 100%:
+Добавить параметр MAX_CONCURRENT_FILES / семафор.
+Тест с синтетическим CSV > 1e5 строк (ускоренный) + проверка корректности batch size.
+
+Статус выполнения (п.5):
+ - Добавлен параметр MAX_CONCURRENT_FILES в settings.
+ - В `process_unprocessed_signals` внедрён семафор и параллельная обработка с ограничением concurrency через asyncio.gather.
+ - Логика подсчёта статистики адаптирована под параллельный режим.
+Осталось: интеграционный тест производительности (перенос в п.14), возможно аналогичный семафор для загрузчика CSV (опционально позже).
+
+
+6. Ingestion / Pipeline – 75%
+
+e2e_pipeline, автозапуск при API старте (INGEST_STARTUP_DIR), loader сервис.
+Нет мониторинга прогресса (кол-во файлов, %).
+Нет re-run idempotency (dedup strict по file_hash в коде? Hash есть в схеме, но не виден контролирующий апсертающего кода). Для 100%:
+Добавить API /pipeline/status.
+Ввести UPSERT по file_hash (UNIQUE INDEX + ON CONFLICT DO NOTHING) + лог пропусков.
+
+-- Обновление (Пункт 6 выполнен частично) --
+Добавлено:
+ * Уникальный индекс модели RawSignal.uq_raw_signals_file_hash (для строгой дедупликации загрузок по file_hash).
+ * Роутер pipeline_status с эндпоинтом GET /api/v1/pipeline/status (агрегаты total_raw, pending, processing, completed, failed, features_total, last_recorded_at, optional equipment_id filter).
+ * Подключение роутера в api.main.
+Оставшиеся задачи по пункту 6:
+ * Сгенерировать Alembic ревизию, создающую уникальный индекс в реальной схеме (сейчас только на уровне ORM).
+ * Обернуть вставку пачек в csv_loader в try/except IntegrityError чтобы тихо логировать пропуски при гонках вместо исключения.
+ * Добавить метрику ingest_duplicates_total и ingest_skipped_total.
+ * Тесты эндпоинта /pipeline/status и сценарий дедупликации (перенесено в пункт 14 тесты).
+
+-- Дополнительное обновление 2025-08-17 --
+Пункт 6 (Ingestion / Pipeline):
+ * Создана Alembic ревизия 20250817_01_add_unique_rawsignal_file_hash (idempotent create_index) – миграционная фиксация уникального индекса выполнена.
+ * В `csv_loader.py` добавлена обработка IntegrityError при commit (гонки дубликатов) с мягким завершением.
+ * Добавлены метрики csv_duplicates_total и csv_duplicate_skipped_total (Prometheus) и инкрементируются при обнаружении дубликата и при гонке.
+ Осталось: вынести имена метрик в README (Monitoring), тесты сценариев дубликатов (п.14), опционально единый ingest_progress gauge.
+
+Пункт 7 (ML: Anomaly Detection) – обновление:
+ * Внедрена новая минимальная функция retrain_stream_or_stats_minimal(): обучает streaming HalfSpaceTrees (river) или fallback StatsQuantileBaseline, рассчитывает threshold (p98 квантиль или z_threshold), сохраняет manifest.json с полями {model_type, threshold, version, n_samples, created_at} и state (stream_state.pkl или stats_state.json).
+ * Задача Celery retrain_models_task переключена на новую функцию; возвращает model_type и threshold; обновляет gauges/counters.
+ * Лоадер моделей (`load_latest_models_async`) теперь читает version из manifest; detect_anomalies пишет фактическую версию в Prediction.model_version.
+ * Добавлены метрики дублей ingestion (см. п.6) — косвенно улучшают чистоту данных для аномалий.
+ Осталось для п.7: метрики качества retrain (outlier_ratio, p95 score), GC старых версий (удалять state/manifest >N), юнит/интеграционные тесты (п.14), документация manifest формата в README.
+
+8. ML: Forecasting – обновление (начало выполнения):
+ * Добавлена периодическая Celery задача forecast_all_equipment_task (каждые 6 часов) – генерирует прогнозы для активного оборудования, сохраняет в таблицу Forecast + агрегированную Prediction запись.
+ * Добавлены Prometheus метрики: forecast_tasks_total (статус фоновых прогонов), расширено использование forecasts_generated_total (success/failed на оборудование).
+ * При обработке сырого сигнала уже сохраняется Forecast (ранее реализовано); теперь периодический батч покрывает оборудование без новых сигналов.
+ Осталось для п.8: версионирование модели прогноза (dynamic model_version), сохранение history+future объединённо в forecast_data (график), метрика forecast_latency_seconds интегрировать в фоновую задачу, fallback стратегию когда Prophet недоступен явно отражать в manifest прогноза (пока нет manifest), автозапуск после ingest параметризуемый (AUTO_FORECAST_AFTER_INGEST уже есть — проверить использование). Тесты (п.14).
+
+
+7. ML: Anomaly Detection – 80%
+
+IsolationForest + clustering fallback, prediction persistence.
+Отсутствует управление версиями моделей (model_version жёстко 'v1').
+Нет retrain scheduler/trigger (кроме ручного). Для 100%:
+Добавить Celery задачу periodic retrain (раз в сутки) с метрикой качества.
+Версионирование (дата/commit хэш).
+
+Статус выполнения (п.7):
+ - Добавлена периодическая задача retrain_models_daily (Celery) -> task ml.retrain_models.
+ - Реализована функция train_isolation_forest_minimal() с версией по timestamp и сохранением в models/anomaly_detection/latest.
+ - Добавлены метрики: model_retrain_total (counter), model_version_info (gauge) + обновление при успешном retrain.
+Осталось:
+ - Качество: добавить оценку (silhouette / outlier_ratio) и записывать в prediction_details или отдельный stats объект.
+ - Хранить историю версий и лимитировать число файлов (GC старых моделей >N).
+ - Тесты retrain (п.14) и проверка обновления manifest.
+
+8. ML: Forecasting (Prophet + fallback + sequence LSTM + TCN) – 75%
+
+Базовые функции forecast_rms, sequence_risk, TCN training stub.
+Нет orchestration автоматического прогноза после новых данных (кроме опции AUTO_FORECAST_AFTER_INGEST не реализованной явно).
+Не сохраняется объект прогноза RMS в таблицу forecasts / predictions (только endpoint выдаёт JSON). Для 100%:
+Создавать запись Forecast/Prediction при forecast_rms.
+Автозадача periodic forecast (каждые X часов) по активному оборудованию.
+Логи ошибок Prophet.
+
+9. ML: Clustering / Defect Mapping – 65%
+
+Классические функции (UMAP/HDBSCAN/kNN) упомянуты, но нет полной интеграции post-ingest.
+Нет автоматической актуализации cluster_labels → defect_catalog.
+Нет визуализации распределения кластеров на Dashboard. Для 100%:
+Celery task refresh_clusters (раз в сутки или по порогу новых features).
+Endpoint /clusters/summary + Dashboard страница.
+Semi-supervised assign + отчёт.
+
+10. Dashboard (Streamlit) – 80%
+
+Основные вкладки + новая «Тренды», PDF отчёт.
+Несоответствие пути прогнозов RMS (см. выше).
+Нет отображения прогноза RMS графика истории + будущего вместе (только будущий).
+Админ страница ссылается на не реализованные /admin/users. Для 100%:
+Исправить путь эндпоинта.
+Объединённый график (история + forecast + threshold).
+Скрыть или реализовать админ функции.
+
+11. Мониторинг / Observability – 78%
+
+Prometheus middleware, системные метрики, счётчики API.
+Нет метрик по Feature Store hits, ingest progress, forecast success rate.
+Нет алертов/рекомендаций в docs. Для 100%:
+Добавить custom counters: feature_store_hit_total, ingest_files_processed_total, forecast_fail_total.
+Экспорт Celery metrics (beat lag, active tasks) через flower или отдельный exporter.
+
+12. Кеширование / Redis – 75%
+
+Prediction cache + FeatureStore redis backend.
+Нет механизма очистки просроченных ключей в DB fallback таблице prediction_cache.
+Нет circuit breaker при падении Redis (только предупреждение). Для 100%:
+Periodic cleanup task для prediction_cache (DELETE expired).
+Рetry backoff wrapper для Redis операций.
+
+13. Безопасность / Auth – 70%
+
+JWT, роли, базовый RBAC.
+Нет password rotation policy, rate limiting, audit endpoints подтверждения.
+Admin UI security settings не связаны с backend. Для 100%:
+Реализовать /admin/security/settings эндпоинт (если отсутствует).
+Ввести лимит частоты логина (Redis counter + cooldown).
+Добавить refresh token endpoint + blacklist.
+
+14. Тесты – 55%
+
+Упоминания тестов, но нет подтверждённого покрытия новых модулей (FeatureStore, partitioning, forecast endpoints).
+Нет нагрузочных/перф тестов. Для 100%:
+Добавить тесты: feature_store (db), forecast_rms (insufficient vs normal), sequence_risk (cache hit), partition idempotency, ensure_partitions Celery task.
+Basic performance smoke (обработка 1 synthetic файл).
+
+15. Документация – 85%
+
+README расширен; описаны тренды, партиционирование.
+Нет списка переменных окружения таблицей, нет инструкции rollback партиционирования. Для 100%:
+Добавить .env.example актуализацию (FEATURE_STORE_BACKEND, INGEST_*).
+Таблица ENV VARS + раздел «Миграции и партиционирование (операционные риски)».
+
+16. Docker / Deploy – 75%
+
+docker-compose.* есть, но не проверен единый celery_app после изменений.
+Нет отдельного celery-beat сервиса для периодических задач ensure_partitions. Для 100%:
+Добавить service celery-beat (команда: celery -A src.worker.config beat).
+HEALTHCHECK для worker и dashboard.
+
+17. Производительность / Масштабирование – 70%
+
+Почасовые агрегаты, партиционирование, batch size.
+Нет горизонтального шардинга/квот, нет эвикции старых raw_signals (retention). Для 100%:
+Retention policy task (удаление/архивация старше N дней).
+Индексы review (explain analyze на критичных запросах).
+Критические расхождения к запуску (исправить первыми):
+
+Дублированный celery_app → объединить.
+Несовпадающий путь прогноза RMS в Dashboard.
+Админ UI вызывает несуществующие endpoints → скрыть или реализовать.
+Отсутствие тестов для новых ключевых эндпоинтов и Feature Store.
+
+Быстрый чеклист до 100%:
+
+ Объединить celery_app + перенести ensure_partitions periodic.
+ Исправить путь /forecast_rms в trends.py или добавить алиас.
+ Реализовать /admin/users & /admin/security/... или убрать из UI.
+ Тесты: feature_store, forecast_rms, sequence_risk, partition script idempotent.
+ Alembic baseline + миграция вместо «ручных» SQL (или чётко документировать стратегию).
+ Сохранение результатов forecast_rms в таблицу Forecast/Prediction.
+ Добавить Celery beat сервис + retrain/forecast periodic.
+ Метрики Feature Store и ingest progress.
+ ENV VARS таблица в README.
+ Retention / cleanup tasks (prediction_cache DB, старые raw_signals).
+ 
+-- Обновление (Пункт 6 выполнен частично) --
+Добавлено:
+ * Уникальный индекс модели RawSignal.uq_raw_signals_file_hash (для строгой дедупликации загрузок по file_hash).
+ * Роутер pipeline_status с эндпоинтом GET /api/v1/pipeline/status (агрегаты total_raw, pending, processing, completed, failed, features_total, last_recorded_at, optional equipment_id filter).
+ * Подключение роутера в api.main.
+Оставшиеся задачи по пункту 6:
+ * Сгенерировать Alembic ревизию, создающую уникальный индекс в реальной схеме (сейчас только на уровне ORM).
+ * Обернуть вставку пачек в csv_loader в try/except IntegrityError чтобы тихо логировать пропуски при гонках вместо исключения.
+ * Добавить метрику ingest_duplicates_total и ingest_skipped_total.
+ * Тесты эндпоинта /pipeline/status и сценарий дедупликации (перенесено в пункт 14 тесты).
+
+
+
+18. Доработка моделей
+
+Структура и пайплайн
+Имеется: ingestion (dedup), извлечение признаков, генерация embedding (в extra.embedding), кластеризация (UMAP+HDBSCAN), присвоение cluster_id, ручное маппирование cluster->defect, kNN (semi‑supervised) вручную.
+Автоматизация: периодические задачи (retrain аномалий, прогнозы, кластеризация) – есть. Нет периодического обновления kNN/label coverage.
+Маніфесты: anomaly + clustering (есть), нет manifest для прогнозов и embedding версии.
+Набор данных для обучения классификатора (через кластеры) Что нужно измерить (рекомендованные SQL/метрики):
+Объём: SELECT count(*) FROM features;
+Покрытие embedding: SELECT count(*) FROM features WHERE extra ? 'embedding'; -> ratio = embedding_count/total.
+Размерность embedding (консистентность): SELECT jsonb_array_length(extra->'embedding') AS dim, count(*) FROM features WHERE extra ? 'embedding' GROUP BY dim;
+Наличие пропусков базовых числовых признаков (например rms_a IS NULL) для оценки чистоты.
+Распределение по кластерам: SELECT cluster_id, count(*) FROM features GROUP BY cluster_id;
+noise_ratio = count(cluster_id IS NULL)/total
+min / median / p90 размера кластера
+Покрытие меток дефектов:
+total_clusters_labeled = SELECT count(DISTINCT cluster_id) FROM cluster_labels;
+total_clusters = SELECT count(DISTINCT cluster_id) FROM features WHERE cluster_id IS NOT NULL;
+coverage = labeled / total_clusters.
+Кластеры с низкой численностью (риск переобучения):
+SELECT cluster_id, count() c FROM features WHERE cluster_id IS NOT NULL GROUP BY cluster_id HAVING count() < 20;
+Временной охват и свежесть:
+SELECT min(window_start), max(window_end) FROM features;
+recency_gap = now() - max(window_end).
+Баланс по оборудованию: SELECT equipment_id, count(*) FROM raw_signals JOIN features USING(id) GROUP BY equipment_id; (или через raw->feature связь) — ищем сильный дисбаланс.
+Метки дефектов против объёма: SELECT defect_id, count(*) FROM cluster_labels JOIN features ON cluster_labels.cluster_id=features.cluster_id GROUP BY defect_id;
+Критерии готовности (предлагаемые пороги)
+Embedding coverage ≥ 90% (Amber 70–90, Red <70).
+Единая размерность embedding (1 значение dim). Любые отклонения → Amber.
+Noise ratio (NULL cluster_id) ≤ 25% (Amber 25–40, Red >40).
+Cluster label coverage ≥ 60% (Amber 30–60, Red <30) до запуска supervised этапа.
+Минимальный размер кластера среди labeled ≥ 15 (иначе такие кластеры пометить к слиянию/регуляризации).
+Recency gap ≤ 24h (Amber 1–3 дня, Red >3 дней) для онлайн‑обновляемой модели.
+Баланс: ни один equipment_id не должен иметь >60% всех embedding (иначе нужен стратифицированный sampling / веса).
+Незаполненные числовые признаки (rms_*, crest_*, etc.) <2% (Amber 2–5, Red >5).
+Текущие сильные стороны
+Потоковая подготовка признаков и автоматическая кластеризация уже интегрированы.
+Manifest для кластеризации + label coverage endpoint (/summary) упрощают мониторинг.
+Архитектура позволяет быстро добавить автоматический retrain kNN при изменении label coverage.
+Текущие пробелы / риски
+Нет автоматического сбора готовностных метрик (придётся выполнять вручную).
+Отсутствует forecast manifest и версия embedding (не фиксируется генератор embedding модели → сложно воспроизводить).
+Не внедрён дрифт‑мониторинг (embedding distribution shift, кластерная стабильность).
+Нет периодического автотренинга kNN после появления новых меток.
+Нет тестов для кластеризации и embedding целостности (риск молчаливых регрессий).
+Не реализована стратификация / балансировка при подготовке обучающей выборки.
+Не фиксируется статистика распределения целевых (defect) меток — невозможно оценить class imbalance заранее.
+Рекомендованный следующий шаг (быстрые правки) A. Добавить endpoint /admin/data-readiness возвращающий перечисленные метрики (или Celery периодический job, который пишет JSON в models/data_readiness.json и экспортирует Prometheus gauges). B. В metrics:
+
+features_with_embedding_total, embedding_coverage_ratio
+clustering_noise_ratio
+clustering_label_coverage_ratio
+min_cluster_size_labeled, p50_cluster_size, p90_cluster_size
+data_recency_seconds C. Manifest для embedding extractor (версия архитектуры, размерность, дата последнего обновления). D. Авто retrain kNN: периодическая задача, условие: label_coverage изменилось >5% или добавлено >=N новых labeled кластеров. E. Скрипт snapshot: выгружаем features (id, cluster_id, embedding, defect_label) в версионированный parquet для обучения offline моделей. F. Drift sentinel: сохранять прошлый вектор кластерных центроидов / silhouette proxy и мониторить изменение.
+Итоговая оценка готовности (без фактических чисел, так как не извлечены):
+
+Data pipeline readiness: Green (инфраструктура и автоматизация есть).
+Feature & embedding coverage: Unknown (нужен подсчёт) → Tentative Amber.
+Label coverage: Unknown (endpoint есть) → Tentative Amber, пока нет отчёта.
+Reproducibility (versions): Amber (не хватает embedding + forecast manifest).
+Monitoring & quality gates: Amber (частично есть; нет drift + readiness gauges).
+Training dataset curation (balance, snapshots, tests): Red (ещё не реализовано).
+Что сделать прямо сейчас (приоритет топ-5)
+Реализация вычисления и экспозиции readiness метрик (endpoint + Prometheus).
+Manifest для embedding generator (версия, hash кода, dim, дата).
+Авто retrain kNN по условию + запись его manifest (kNN_version, coverage_at_train).
+Snapshot скрипт для фиксирования обучающего набора (parquet + metadata JSON).
+Минимальный тест: проверка что embedding_dim постоянна и noise_ratio < установленного порога (fail fast).

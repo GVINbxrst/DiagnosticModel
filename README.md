@@ -231,6 +231,48 @@ make up-dev  # Запуск с автоперезагрузкой
 - **XGBoost**: Для краткосрочных прогнозов
 - **Prophet**: Для временных рядов
 - **LSTM**: Для долгосрочных трендов
+ - **TCN (Temporal Convolutional Network)**: Прогноз вероятности возникновения дефекта и степени его развития на горизонте H.
+
+### Sequence / TCN Обучение
+
+Минимальный запуск обучения TCN (использует эмбеддинги и агрегаты признаков):
+
+```bash
+python -c "import asyncio,uuid; from src.ml.tcn_forecasting import train_tcn; from src.config.settings import get_settings; eid='00000000-0000-0000-0000-000000000000'; asyncio.run(train_tcn(uuid.UUID(eid)))"
+```
+
+Параметры настраиваются через переменные окружения или `.env`:
+
+```
+TCN_WINDOW_SIZE=32
+TCN_PREDICTION_HORIZON=4
+TCN_CHANNELS=64,64,64
+TCN_KERNEL_SIZE=3
+TCN_DROPOUT=0.1
+TCN_MAX_EPOCHS=10
+TCN_LEARNING_RATE=0.001
+```
+
+После обучения модель сохраняется в директорию `models/tcn/model_<equipment_id>.pkl`.
+
+### Кеширование моделей
+
+Включено через настройку `USE_MODEL_CACHE=true`.
+
+Кешируются:
+ - Prophet модель для RMS (`models/prophet_rms/<equipment_id>.pkl`)
+ - LSTM sequence (`models/lstm_seq/<equipment_id>.pkl`)
+ - TCN (`models/tcn/model_<equipment_id>.pkl`)
+
+Метрика `model_cache_events_total{model_name, event}` отслеживает события:
+ - `hit` — модель найдена в памяти / на диске
+ - `miss` — модель отсутствовала и была обучена заново
+ - `store` — успешное сохранение модели в кеш
+
+Пример просмотра метрики:
+```
+curl http://localhost:8001/metrics | findstr model_cache_events_total
+```
 
 ### Признаки
 - **Временная область**: RMS, среднее, дисперсия, kurtosis, skewness
@@ -243,6 +285,31 @@ make up-dev  # Запуск с автоперезагрузкой
 - Производительность системы (CPU, память, диск)
 - Качество моделей ML (точность, полнота, F1-score)
 - Бизнес-метрики (количество обработанных файлов, аномалий)
+
+### Метрики готовности данных / кластеризации
+Добавлены Prometheus метрики:
+- `features_with_embedding_total` – количество Feature с embedding
+- `embedding_coverage_ratio` – доля features с embedding
+- `clustering_noise_ratio` – доля точек без cluster_id
+- `clustering_label_coverage_ratio` – покрытие кластеров метками дефектов
+- `min_cluster_size_labeled`, `p50_cluster_size`, `p90_cluster_size` – статистика размеров кластеров
+- `data_recency_seconds` – давность последнего окна признаков
+- `clustering_drift_score` – оценка дрейфа распределения кластеров (JS divergence 0..1)
+- `training_snapshot_timestamp` – время последнего snapshot датасета
+
+### Data Readiness & Snapshot Endpoints
+- `GET /admin/clustering/data-readiness` – агрегированные метрики готовности
+- `GET /admin/clustering/summary` – дистрибуция кластеров + manifest + label coverage
+- `POST /admin/clustering/snapshot` – формирование parquet snapshot (embeddings+labels)
+- `GET /admin/clustering/embedding-manifest` – manifest embedding автоэнкодера (код hash, dim, версия)
+
+### Манифесты моделей
+Хранятся в каталоге `models/`:
+- `models/anomaly_detection/latest/manifest.json` – streaming anomaly модель (threshold, p98, outlier_ratio, version)
+- `models/clustering/manifest.json` – результаты последней кластеризации (clusters_found, labeled, params)
+- `models/embeddings/manifest.json` – автоэнкодер эмбеддингов (embedding_dim, code_hash, trained_at, version, final_loss)
+- `models/clustering/knn_manifest.json` – semi-supervised kNN состояние (coverage)
+- `models/snapshots/<ts>/manifest.json` – snapshot обучающего набора
 
 ### Алерты
 - Падение качества модели
@@ -270,6 +337,29 @@ make up-dev  # Запуск с автоперезагрузкой
 - Redis кеширование для частых операций
 - Батчевая обработка CSV файлов
 - Асинхронные задачи для тяжелых операций
+ - Партиционирование таблиц `raw_signals` и `features` по месяцам (`sql/schema/005_partitioning.sql`)
+ - Почасовые агрегаты RMS (`hourly_feature_summary`) + Feature Store (db/redis)
+ - Прореживание и агрегация данных для визуализаций (часовой тренд)
+ - Кэширование результатов sequence risk (Redis / DB fallback)
+
+## Dashboard: Тренды, Риск и Feature Store
+
+Добавлена вкладка **"Тренды"**:
+ - Почасовой график среднего RMS (агрегаты из HourlyFeatureSummary или Redis Feature Store)
+ - Кнопка расчёта краткосрочного риска (sequence LSTM) через эндпоинт `GET /api/v1/signals/sequence_risk/{equipment_id}`
+ - Эндпоинт тренда: `GET /api/v1/equipment/{equipment_id}/rms/hourly?limit=168`
+
+Feature Store (`src/utils/feature_store.py`):
+ - Backend `db`: чтение из БД без дополнительного хранения
+ - Backend `redis`: хранение последних N точек в Redis списке
+ - Авто-запись RMS при сохранении признаков
+ - Параметры управления: FEATURE_STORE_BACKEND (db|redis), MAX_FEATURE_STORE_POINTS (лимит точек для redis)
+ - Метрики: feature_store_hit_total{backend}, feature_store_miss_total{backend,reason}
+
+Партиционирование:
+ - Скрипт `sql/schema/005_partitioning.sql` преобразует таблицы в декларативно партиционированные и создаёт месячные партиции ±12 месяцев
+ - Выполнение: `psql "$DATABASE_URL" -f sql/schema/005_partitioning.sql`
+
 
 ## Развертывание
 

@@ -24,6 +24,9 @@ scikit-learn==1.5.0
 xgboost==2.0.2
 statsmodels==0.14.0
 prophet==1.1.5
+torch==2.2.2
+umap-learn==0.5.5
+hdbscan==0.8.37
 
 # Визуализация данных
 matplotlib==3.7.2
@@ -84,6 +87,9 @@ openpyxl==3.1.2
 
 # Дополнительные научные библиотеки
 numba==0.58.1
+
+# Инкрементальное обучение (streaming anomaly detection)
+river==0.21.1
 
 # Работа с конфигурационными файлами
 toml==0.10.2

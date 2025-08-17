@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from src.database.connection import get_async_session  # re-export for tests patching
 from src.api.middleware.metrics import PrometheusMiddleware
-from src.api.routes import monitoring, signals, upload, auth, anomalies, admin_security
+from src.api.routes import monitoring, signals, upload, auth, anomalies, admin_security, pipeline_status
 import inspect
 try:
     import httpx
@@ -20,6 +20,24 @@ except Exception:  # pragma: no cover
     pass
 from src.utils.logger import setup_logging, get_logger
 from src.utils.metrics import metrics_collector
+from src.config.settings import get_settings
+
+async def _maybe_run_startup_ingest():  # pragma: no cover - инфраструктура
+    st = get_settings()
+    if not st.INGEST_STARTUP_DIR:
+        return
+    import os, asyncio
+    from scripts.e2e_pipeline import run_pipeline  # type: ignore
+    path = st.INGEST_STARTUP_DIR
+    if not os.path.isdir(path):
+        logger.warning(f"Startup ingest: каталог не найден {path}")
+        return
+    logger.info(f"Startup ingest: начало обработки каталога {path}")
+    try:
+        await run_pipeline(path, None, st.INGEST_TRAIN_FULL, st.INGEST_FILE_PATTERN, st.INGEST_MAX_FILES)
+        logger.info("Startup ingest завершён")
+    except Exception as e:
+        logger.warning(f"Startup ingest не удался: {e}")
 
 # Настройка логирования при запуске
 setup_logging()
@@ -33,6 +51,8 @@ async def lifespan(app: FastAPI):  # pragma: no cover - оборачиваем �
         logger.info("📊 Система метрик инициализирована")
     except Exception:  # не валим приложение из-за метрик
         logger.warning("Не удалось инициализировать метрики при старте", exc_info=True)
+    # Автоинжест (опционально)
+    await _maybe_run_startup_ingest()
     yield
     try:
         logger.info("🛑 Завершение работы DiagMod API")
@@ -79,5 +99,6 @@ app.include_router(anomalies.router, prefix="/api/v1", tags=["anomalies"])
 app.include_router(auth.router, prefix="/api/v1", tags=["auth"])  # версия API
 app.include_router(auth.router, prefix="/auth", tags=["auth"])    # legacy совместимость для тестов
 app.include_router(admin_security.router, prefix="/admin/security", tags=["admin-security"])  # административные security эндпоинты
+app.include_router(pipeline_status.router, prefix="/api/v1", tags=["pipeline"])  # статус конвейера загрузки
 
 ## Удалены on_event startup/shutdown (заменены lifespan)
