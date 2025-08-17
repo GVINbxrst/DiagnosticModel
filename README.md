@@ -60,6 +60,42 @@ make seed   # Загрузка тестовых данных
 - **Prometheus**: http://localhost:9090
 - **Grafana**: http://localhost:3000 (admin/admin123)
 
+### 5. Локальный E2E (без Docker, SQLite + Celery eager)
+
+```bash
+# 1. Установить зависимости
+make install-dev
+
+# 2. Включить синхронный режим выполнения задач (без Redis)
+set CELERY_TASK_ALWAYS_EAGER=1  # PowerShell/Windows
+# export CELERY_TASK_ALWAYS_EAGER=1  # bash/Linux/macOS
+
+# 3. Выполнить шаги по отдельности
+make process-raw    # обработка сырых сигналов -> извлечение признаков
+make anomalies      # запуск детекции аномалий
+make forecast       # прогноз трендов
+make report         # сводный отчёт в консоли
+
+# Или полный конвейер одним шагом
+make pipeline
+```
+
+### 6. Быстрый запуск с PostgreSQL (ручная инициализация без Alembic)
+
+```bash
+make install-dev
+# Убедитесь что PostgreSQL запущен и доступен по DATABASE_URL (.env)
+make init-db          # создаёт таблицы (Base.metadata.create_all)
+set CELERY_TASK_ALWAYS_EAGER=1  # или export ...
+python scripts/e2e_pipeline.py --csv ./data/raw --pattern "*.csv" --train-full
+make report-html      # HTML отчёт -> reports/latest_report.html
+```
+
+Если в CSV только три колонки токов (current_R,current_S,current_T) — этого достаточно для минимального пайплайна.
+
+Переменная окружения `CELERY_TASK_ALWAYS_EAGER=1` позволяет выполнять Celery-задачи синхронно
+в текущем процессе для быстрой локальной отладки без запуска брокера Redis.
+
 ## Использование
 
 ### Загрузка данных

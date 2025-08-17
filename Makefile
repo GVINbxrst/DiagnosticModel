@@ -55,6 +55,12 @@ ifeq ($(OS),Windows_NT)
 	@echo "  dev-api          Запустить API в режиме разработки"
 	@echo "  dev-worker       Запустить Worker"
 	@echo "  dev-dashboard    Запустить Dashboard"
+	@echo "  process-raw      Обработать все необработанные RawSignal"
+	@echo "  anomalies        Запустить детекцию аномалий для новых признаков"
+	@echo "  forecast         Прогноз трендов для активного оборудования"
+	@echo "  report           Сводный аналитический отчёт"
+	@echo "  ingest           Загрузить локальные CSV файлы в RawSignal"
+	@echo "  pipeline         Полный E2E конвейер"
 	@echo "  clean            Очистить временные файлы"
 	@echo "  info             Информация о проекте"
 else
@@ -208,6 +214,12 @@ db-upgrade: ## Применить миграции
 	$(PYTHON) -m alembic upgrade head
 	@echo "Миграции применены"
 
+create-db: ## Создать PostgreSQL базу данных (использует скрипт create_database.py)
+	$(PYTHON) scripts/create_database.py --db $(or $(DB),diagmod) --user $(or $(PGUSER,postgres)) --password $(or $(PGPASSWORD,postgres)) --host $(or $(PGHOST,localhost)) --port $(or $(PGPORT,5432))
+
+init-db: ## Инициализация БД (DROP=1 для очистки, SEED=1 для начальных данных)
+	$(PYTHON) scripts/init_db.py $(if $(DROP),--drop,) $(if $(SEED),--seed,)
+
 # =============================================================================
 # Разработка
 # =============================================================================
@@ -237,6 +249,31 @@ dev-all: ## Запустить все компоненты в режиме ра�
 	@echo "Запуск всех компонентов..."
 	make docker-up
 	@echo "Все компоненты запущены в Docker"
+
+# =============================================================================
+# Batch / Pipeline
+# =============================================================================
+
+process-raw: ## Обработать все необработанные RawSignal (локально, eager)
+	set CELERY_TASK_ALWAYS_EAGER=1 && $(PYTHON) scripts/process_all_rawsignals.py
+
+anomalies: ## Детектировать аномалии для признаков без Prediction
+	set CELERY_TASK_ALWAYS_EAGER=1 && $(PYTHON) scripts/run_anomaly_detection_all.py
+
+forecast: ## Прогноз трендов для активного оборудования
+	set CELERY_TASK_ALWAYS_EAGER=1 && $(PYTHON) scripts/forecast_all_equipment.py
+
+report: ## Построить сводный отчёт
+	$(PYTHON) scripts/analytics_report.py
+
+report-html: ## Построить HTML отчёт (reports/latest_report.html)
+	$(PYTHON) scripts/build_html_report.py
+
+ingest: ## Загрузить локальные CSV (DIR=каталог PATTERN=*.csv REC=1 LIMIT=N)
+	@if not "$(DIR)"=="" ( set CELERY_TASK_ALWAYS_EAGER=1 && $(PYTHON) scripts/ingest_local_csv.py --path "$(DIR)" --pattern "$(PATTERN)" $(if $(REC),--recursive,) $(if $(LIMIT),--limit $(LIMIT),) ) else ( echo "Укажите DIR= каталог" )
+
+pipeline: ## Полный E2E конвейер (обработка -> модель -> аномалии -> прогноз -> отчёт)
+	set CELERY_TASK_ALWAYS_EAGER=1 && $(PYTHON) scripts/e2e_pipeline.py --limit 50
 
 # =============================================================================
 # Очистка и служебные команды

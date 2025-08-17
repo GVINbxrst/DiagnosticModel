@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import gzip
-from typing import Optional
+import pickle
+from typing import Optional, Any
 
 import numpy as np
 
@@ -26,4 +27,10 @@ def load_float32_array(b: Optional[bytes]) -> Optional[np.ndarray]:
     return np.frombuffer(data, dtype=np.float32)
 
 
-__all__ = ["dump_float32_array", "load_float32_array"]
+def dump_pickle_to_bytes(obj: Any) -> bytes:
+    """Сжать объект через pickle + gzip (простая утилита для тестов)."""
+    raw = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+    return gzip.compress(raw, compresslevel=6)
+
+
+__all__ = ["dump_float32_array", "load_float32_array", "dump_pickle_to_bytes"]

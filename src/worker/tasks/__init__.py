@@ -12,10 +12,9 @@ _EXPORTED = [
 	'process_raw', 'detect_anomalies', 'forecast_trend',
 	'cleanup_old_data', 'retrain_models',
 	'_process_raw_async', '_detect_anomalies_async', '_forecast_trend_async',
-	'_process_raw_pipeline_async',
 	'decompress_signal_data', 'compress_and_store_results',
 	'_prepare_feature_vector', '_update_signal_status', 'get_async_session',
-	# Экспорт для unit-тестов (patch targets)
+	# Patch targets
 	'FeatureExtractor', 'load_latest_models_async', 'RMSTrendForecaster'
 ]
 

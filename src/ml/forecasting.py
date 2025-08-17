@@ -1031,32 +1031,32 @@ if __name__ == "__main__":
             # Выводим результаты
             if 'summary' in results:
                 summary = results['summary']
-                print(f"\n📊 Сводка прогнозирования:")
-                print(f"  - Фаз обработано: {summary['successful_phases']}/{summary['total_phases']}")
-                print(f"  - Максимальная вероятность аномалии: {summary['max_anomaly_probability']:.1%}")
+                logger.info("Сводка прогнозирования")
+                logger.info(f"Фаз обработано: {summary['successful_phases']}/{summary['total_phases']}")
+                logger.info(f"Макс вероятность аномалии: {summary['max_anomaly_probability']:.1%}")
 
                 if summary['critical_phases']:
-                    print(f"  - Критические фазы:")
+                    logger.warning("Критические фазы:")
                     for critical in summary['critical_phases']:
-                        print(f"    • Фаза {critical['phase_name']}: {critical['probability']:.1%}")
+                        logger.warning(f"Фаза {critical['phase_name']}: {critical['probability']:.1%}")
 
             for phase, phase_result in results['phases'].items():
                 if phase_result.get('success', True):
                     anomaly = phase_result['anomaly_analysis']
-                    print(f"\n🔮 Фаза {phase.upper()}:")
-                    print(f"  - Прогноз на {args.steps} шагов")
-                    print(f"  - Порог аномалии: {phase_result['threshold']:.4f}")
-                    print(f"  - Вероятность превышения: {anomaly['max_probability']:.1%}")
+                    logger.info(f"Фаза {phase.upper()}")
+                    logger.info(f"Прогноз на {args.steps} шагов")
+                    logger.info(f"Порог аномалии: {phase_result['threshold']:.4f}")
+                    logger.info(f"Вероятность превышения: {anomaly['max_probability']:.1%}")
                     if anomaly['any_exceedance']:
-                        print(f"  - ⚠️  Прогнозируется превышение порога!")
+                        logger.warning("Прогнозируется превышение порога")
                 else:
-                    print(f"\n❌ Фаза {phase.upper()}: {phase_result.get('error', 'Неизвестная ошибка')}")
+                    logger.error(f"Фаза {phase.upper()}: {phase_result.get('error', 'Неизвестная ошибка')}")
 
             return True
             
         except Exception as e:
             logger.error(f"Ошибка прогнозирования: {e}")
-            print(f"❌ Ошибка: {e}")
+            # stdout удалён — только логирование
             return False
     
     import asyncio

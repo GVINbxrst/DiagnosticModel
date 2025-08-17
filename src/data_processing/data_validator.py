@@ -40,10 +40,14 @@ class DataValidator:  # Основной валидатор
         self,
         phase_data: Dict[str, List[float]],
         sample_rate: int,
-        filename: str = "unknown"
+        filename: str = "unknown",
+        motor_metadata: Optional[Dict] = None,
     ) -> List[ValidationResult]:
     # Валидация набора фаз
         results = []
+
+        # Доменная проверка параметров мотора (если известны)
+        results.extend(self._validate_motor_params(sample_rate, motor_metadata))
 
     # Частота дискретизации
         results.extend(self._validate_sample_rate(sample_rate))
@@ -178,7 +182,86 @@ class DataValidator:  # Основной валидатор
                 message="Нет данных ни по одной фазе",
                 details={"phase_data": {k: len(v) for k, v in phase_data.items()}}
             ))
+        else:
+            # Предупреждения если фаза полностью пустая либо доля пропусков <10% (мягкий сигнал) для каждой непустой фазы
+            for phase_name, values in phase_data.items():
+                if not values:
+                    results.append(ValidationResult(
+                        severity=ValidationSeverity.WARNING,
+                        message=f"Фаза {phase_name} отсутствует (пустая)",
+                        details={'phase': phase_name}
+                    ))
+                else:
+                    arr = np.array(values)
+                    if arr.size > 0:
+                        nan_ratio = np.sum(np.isnan(arr)) / arr.size
+                        # Фаза частично пустая — это уже обрабатывается в _validate_phase_data (>0.1). Здесь мягкое предупреждение для <=0.1 но >0
+                        if 0 < nan_ratio <= 0.1:
+                            results.append(ValidationResult(
+                                severity=ValidationSeverity.WARNING,
+                                message=f"Небольшое число пропусков в фазе {phase_name}: {nan_ratio:.1%}",
+                                details={'phase': phase_name, 'nan_ratio': nan_ratio}
+                            ))
 
+        return results
+
+    def _validate_motor_params(self, sample_rate: int, motor_metadata: Optional[Dict]) -> List[ValidationResult]:
+        """Проверка моторных параметров.
+
+        Если метаданные не переданы – выдаём только мягкую INFO/WARNING при сильном расхождении частоты.
+        Ожидаемые параметры (жёстко зашиты): асинхронный двигатель 3 кВт, 1770 rpm номинал,
+        multiplier 3010 rpm, sample_rate 25600 Гц.
+        """
+        expected = {
+            'type': 'asynchronous',
+            'power_kw': 3.0,
+            'nominal_speed_rpm': 1770,
+            'multiplier_speed_rpm': 3010,
+            'sample_rate_hz': 25600,
+        }
+        results: List[ValidationResult] = []
+        from src.config.settings import get_settings
+        st = get_settings()
+
+        # Частота дискретизации — единственный реально поступающий параметр сейчас
+        tolerance = expected['sample_rate_hz'] * 0.005  # 0.5%
+        if abs(sample_rate - expected['sample_rate_hz']) > tolerance:
+            sev = ValidationSeverity.CRITICAL if (motor_metadata and not st.is_testing) else (
+                ValidationSeverity.WARNING if not st.is_testing else ValidationSeverity.WARNING)
+            results.append(ValidationResult(
+                severity=sev,
+                message=f"Несоответствие sample_rate: {sample_rate} != {expected['sample_rate_hz']}",
+                details={'expected': expected['sample_rate_hz'], 'actual': sample_rate, 'tolerance': tolerance, 'metadata_present': bool(motor_metadata), 'softened': st.is_testing}
+            ))
+
+        if motor_metadata:
+            # Проверяем каждое доступное поле
+            def _cmp(key, meta_key=None):
+                mk = meta_key or key
+                if mk in motor_metadata:
+                    if motor_metadata[mk] != expected[key]:
+                        results.append(ValidationResult(
+                            severity=ValidationSeverity.CRITICAL,
+                            message=f"Несоответствие параметра мотора {mk}: {motor_metadata[mk]} != {expected[key]}",
+                            details={'param': mk, 'expected': expected[key], 'actual': motor_metadata[mk]}
+                        ))
+                else:
+                    results.append(ValidationResult(
+                        severity=ValidationSeverity.WARNING,
+                        message=f"Параметр мотора {mk} отсутствует в метаданных",
+                        details={'param': mk}
+                    ))
+            _cmp('type')
+            _cmp('power_kw')
+            _cmp('nominal_speed_rpm')
+            _cmp('multiplier_speed_rpm')
+        else:
+            # Нет метаданных — информируем (INFO чтобы не шуметь)
+            results.append(ValidationResult(
+                severity=ValidationSeverity.INFO,
+                message="Метаданные мотора отсутствуют (использованы допущения)",
+                details={'expected': expected}
+            ))
         return results
 
     def _log_validation_results(

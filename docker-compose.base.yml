@@ -1,0 +1,72 @@
+version: '3.8'
+
+# Базовые общие сервисы (БД и брокер), от которых наследуются dev/prod.
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: diagmod_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-diagmod}
+      POSTGRES_USER: ${POSTGRES_USER:-diagmod_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-diagmod_password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/schema:/docker-entrypoint-initdb.d/01-schema:ro
+      - ./sql/views:/docker-entrypoint-initdb.d/02-views:ro
+      - ./sql/procedures:/docker-entrypoint-initdb.d/03-procedures:ro
+      - ./sql/seed:/docker-entrypoint-initdb.d/04-seed:ro
+      - ./configs/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    networks:
+      - diagmod_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: diagmod_redis
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --timeout 300
+    volumes:
+      - redis_data:/data
+      - ./configs/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - diagmod_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./docker_volumes/postgres
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./docker_volumes/redis
+
+networks:
+  diagmod_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

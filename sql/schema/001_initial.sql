@@ -43,6 +43,14 @@ CREATE TYPE defect_severity AS ENUM (
     'critical'   -- Критическая
 );
 
+-- Статусы обработки сырых сигналов (pipeline)
+CREATE TYPE processing_status AS ENUM (
+    'pending',      -- ожидает обработки
+    'processing',   -- в процессе обработки
+    'completed',    -- успешно обработан
+    'failed'        -- обработка завершилась ошибкой
+);
+
 -- Статусы обслуживания
 CREATE TYPE maintenance_status AS ENUM (
     'scheduled',   -- Запланировано
@@ -174,6 +182,7 @@ CREATE TABLE raw_signals (
     file_name VARCHAR(500), -- Имя исходного CSV файла
     file_hash VARCHAR(64),  -- SHA256 хеш файла для дедупликации
     processed BOOLEAN NOT NULL DEFAULT false,
+    processing_status processing_status NOT NULL DEFAULT 'pending',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- Проверки целостности
@@ -253,10 +262,13 @@ CREATE TABLE features (
 CREATE TABLE predictions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     feature_id UUID NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    equipment_id UUID REFERENCES equipment(id),
     defect_type_id UUID REFERENCES defect_types(id),
 
     -- Результаты предсказания
     probability REAL NOT NULL CHECK (probability >= 0 AND probability <= 1),
+    anomaly_detected BOOLEAN NOT NULL DEFAULT false,
+    confidence REAL NOT NULL DEFAULT 0.0 CHECK (confidence >= 0 AND confidence <= 1),
     predicted_severity defect_severity,
     confidence_score REAL CHECK (confidence_score >= 0 AND confidence_score <= 1),
 

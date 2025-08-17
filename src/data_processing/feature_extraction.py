@@ -260,6 +260,34 @@ class FrequencyFeatureExtractor:
         # Находим пики
         peaks_info = self._find_spectral_peaks(frequencies, magnitude_spectrum, top_peaks)
 
+        # Частоты дефектов подшипника (примерные коэффициенты для иллюстрации)
+        # В реальности они зависят от геометрии; используем стандартные placeholder значения.
+        shaft_freq = 50.0  # Гц (основная частота вращения сети / ротора для примера)
+        bpfo = 7.2 * shaft_freq  # Ball Pass Frequency Outer race
+        bpfi = 8.8 * shaft_freq  # Ball Pass Frequency Inner race
+        bsf = 3.6 * shaft_freq   # Ball Spin Frequency
+        ftf = 0.4 * shaft_freq   # Fundamental Train Frequency
+
+        defect_freqs = {
+            'BPFO': bpfo,
+            'BPFI': bpfi,
+            'BSF': bsf,
+            'FTF': ftf
+        }
+
+        defect_peaks = {}
+        for name, freq in defect_freqs.items():
+            # Ищем ближайший индекс
+            if freq <= frequencies[-1]:
+                idx = int(np.argmin(np.abs(frequencies - freq)))
+                defect_peaks[name] = {
+                    'target_frequency': float(freq),
+                    'nearest_frequency': float(frequencies[idx]),
+                    'amplitude': float(magnitude_spectrum[idx])
+                }
+            else:
+                defect_peaks[name] = None
+
         # Вычисляем дополнительные частотные характеристики
         spectral_features = self._compute_spectral_features(frequencies, magnitude_spectrum)
 
@@ -267,6 +295,7 @@ class FrequencyFeatureExtractor:
             'frequencies': frequencies.tolist(),
             'magnitude_spectrum': magnitude_spectrum.tolist(),
             'peaks': peaks_info,
+            'defect_peaks': defect_peaks,
             'spectral_centroid': spectral_features['centroid'],
             'spectral_bandwidth': spectral_features['bandwidth'],
             'spectral_rolloff': spectral_features['rolloff'],
@@ -456,11 +485,21 @@ class FeatureExtractor:
                 continue
 
             try:
+                # Минимальная длина для статистики и FFT
+                if phase_data is not None and phase_data.size < 3:
+                    raise InsufficientDataError(f"Фаза {phase_name} слишком короткая: {phase_data.size}")
                 # Предобработка сигнала
                 clean_signal = self.preprocessor.clean_and_interpolate_signal(phase_data)
 
-                # Извлечение статистических признаков (минимально необходимый набор)
+                # Извлечение статистических признаков
                 statistical_features = self.statistical_extractor.extract_statistical_features(clean_signal)
+                # Формируем список числовых признаков
+                numeric_feature_list = [
+                    ('rms', statistical_features['rms']),
+                    ('std', statistical_features['std']),
+                    ('skewness', statistical_features['skewness']),
+                    ('kurtosis', statistical_features['kurtosis'])
+                ]
 
                 fft_features = None
                 try:
@@ -473,6 +512,7 @@ class FeatureExtractor:
                 phase_features = {
                     'statistical': statistical_features,
                     'frequency': fft_features,
+                    'feature_list': numeric_feature_list,
                     'data_quality': {
                         'original_length': len(phase_data),
                         'processed_length': len(clean_signal),
@@ -785,9 +825,10 @@ if __name__ == "__main__":
             overlap_ratio=args.overlap
         )
 
-        print(f"\n✓ Обработка завершена:")
-        print(f"  - Обработано сигналов: {stats['processed_signals']}")
-        print(f"  - Создано признаков: {stats['created_features']}")
-        print(f"  - Ошибок: {stats['errors']}")
+        logger.info("Обработка завершена")
+        logger.info(f"Обработано сигналов: {stats['processed_signals']}")
+        logger.info(f"Создано признаков: {stats['created_features']}")
+        if stats['errors']:
+            logger.warning(f"Ошибок: {stats['errors']}")
 
     asyncio.run(main())

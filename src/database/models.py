@@ -86,6 +86,13 @@ class UserRole(PyEnum):
     VIEWER = "viewer"
 
 
+class MaintenanceStatus(PyEnum):  # соответствует maintenance_status ENUM в SQL
+    SCHEDULED = "scheduled"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
 class TimestampMixin:  # Временные метки
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -108,7 +115,11 @@ class User(Base, TimestampMixin):  # Пользователи
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[Optional[str]] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole, values_callable=lambda c: [e.value for e in c]), nullable=False, default=UserRole.VIEWER)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, values_callable=lambda c: [e.value for e in c], name="user_role", create_type=False),
+        nullable=False,
+        default=UserRole.VIEWER
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
@@ -119,9 +130,12 @@ class Equipment(Base, TimestampMixin):  # Оборудование
     id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
     equipment_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    type: Mapped[EquipmentType] = mapped_column(Enum(EquipmentType, values_callable=lambda c: [e.value for e in c]), nullable=False)
+    type: Mapped[EquipmentType] = mapped_column(
+        Enum(EquipmentType, values_callable=lambda c: [e.value for e in c], name="equipment_type", create_type=False),
+        nullable=False
+    )
     status: Mapped[EquipmentStatus] = mapped_column(
-        Enum(EquipmentStatus, values_callable=lambda c: [e.value for e in c]),
+        Enum(EquipmentStatus, values_callable=lambda c: [e.value for e in c], name="equipment_status", create_type=False),
         nullable=False,
         default=EquipmentStatus.INACTIVE
     )
@@ -144,7 +158,8 @@ class DefectType(Base):  # Типы дефектов
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     category: Mapped[Optional[str]] = mapped_column(String(100))
-    default_severity: Mapped[DefectSeverity] = mapped_column(Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c]),
+    default_severity: Mapped[DefectSeverity] = mapped_column(
+        Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c], name="defect_severity", create_type=False),
         nullable=False,
         default=DefectSeverity.MEDIUM
     )
@@ -156,7 +171,7 @@ class DefectType(Base):  # Типы дефектов
     )
 
 
-class ProcessingStatus(PyEnum):
+class ProcessingStatus(PyEnum):  # соответствует processing_status ENUM в SQL
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -191,7 +206,7 @@ class RawSignal(Base, TimestampMixin):  # Сырые сигналы
     # Статус обработки
     processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processing_status: Mapped[ProcessingStatus] = mapped_column(
-        Enum(ProcessingStatus, values_callable=lambda c: [e.value for e in c]),
+        Enum(ProcessingStatus, values_callable=lambda c: [e.value for e in c], name="processing_status", create_type=False),
         nullable=False,
         default=ProcessingStatus.PENDING,
         index=True
@@ -303,7 +318,7 @@ class Prediction(Base, TimestampMixin):  # Прогнозы/аномалии
     # Уверенность (дублирующая метрика для удобства фильтрации)
     confidence: Mapped[float] = mapped_column(Numeric(precision=5, scale=4), nullable=False, default=0.0)
     predicted_severity: Mapped[Optional[DefectSeverity]] = mapped_column(
-        Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c])
+        Enum(DefectSeverity, values_callable=lambda c: [e.value for e in c], name="defect_severity", create_type=False)
     )
     confidence_score: Mapped[Optional[float]] = mapped_column(Numeric(precision=5, scale=4))
 
@@ -388,9 +403,63 @@ class UserSession(Base):  # Сессии пользователей
         Index('idx_user_sessions_expires_at', 'expires_at'),
     )
 
+
+class MaintenanceEvent(Base, TimestampMixin):  # События обслуживания
+    __tablename__ = "maintenance_events"
+
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
+    equipment_id: Mapped[UUID] = mapped_column(
+        UniversalUUID(),
+        ForeignKey("equipment.id", ondelete="CASCADE"),
+        nullable=False
+    )
+    user_id: Mapped[Optional[UUID]] = mapped_column(UniversalUUID(), ForeignKey("users.id"))
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)  # planned, emergency, inspection, repair
+    status: Mapped[MaintenanceStatus] = mapped_column(
+        Enum(MaintenanceStatus, values_callable=lambda c: [e.value for e in c], name="maintenance_status", create_type=False),
+        nullable=False,
+        default=MaintenanceStatus.SCHEDULED
+    )
+    scheduled_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    cost: Mapped[Optional[float]] = mapped_column(Numeric(12, 2))
+    parts_replaced: Mapped[Optional[dict]] = mapped_column(JSONB)  # упростим: в SQL массив TEXT[], здесь JSONB для переносимости SQLite
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+    equipment = relationship("Equipment")
+    user = relationship("User")
+
+    __table_args__ = (
+        Index('idx_maintenance_equipment_id', 'equipment_id'),
+        Index('idx_maintenance_status', 'status'),
+        Index('idx_maintenance_scheduled_date', 'scheduled_date'),
+    )
+
+
+class SystemConfig(Base):  # Конфигурация системы
+    __tablename__ = "system_config"
+
+    id: Mapped[UUID] = mapped_column(UniversalUUID(), primary_key=True, default=uuid4)
+    key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    is_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index('idx_system_config_key', 'key', unique=True),
+    )
+
 # Экспорт требуемых сущностей
 __all__ = [
     'Base', 'User', 'Equipment', 'DefectType', 'RawSignal', 'Feature', 'Prediction',
     'SystemLog', 'UserSession', 'ProcessingStatus', 'EquipmentStatus', 'EquipmentType',
-    'DefectSeverity', 'UserRole'
+    'DefectSeverity', 'UserRole', 'MaintenanceEvent', 'SystemConfig', 'MaintenanceStatus'
 ]

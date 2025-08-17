@@ -85,11 +85,19 @@ class TestCSVUtilityFunctions:
         assert phases == ["current_R", "current_S", "current_T"]
 
     def test_parse_csv_header_invalid_count(self):
-        """Тест парсинга заголовка с неправильным количеством фаз"""
+        """Тест что теперь допускается <3 фаз с автодополнением"""
         header = "current_R,current_S"
+        phases = parse_csv_header(header)
+        assert len(phases) == 3
+        assert phases[0].startswith("current_R")
+        assert phases[1].startswith("current_S")
+        assert phases[2].startswith("current_T")
 
-        with pytest.raises(InvalidCSVFormatError):
-            parse_csv_header(header)
+    def test_parse_csv_header_single(self):
+        """Тест заголовка с одной фазой"""
+        header = "current_R"
+        phases = parse_csv_header(header)
+        assert phases == ["current_R","current_S","current_T"]
 
     def test_parse_csv_row_valid(self):
         """Тест парсинга корректной строки данных"""
@@ -236,18 +244,20 @@ class TestCSVLoader:
     def sample_csv_file(self, tmp_path):
         """Создать тестовый CSV файл"""
         csv_file = tmp_path / "test_motor.csv"
-        csv_content = """current_R,current_S,current_T
-1.1,2.2,3.3
-1.2,2.3,3.4
-1.3,,3.5
-1.4,2.5,
-,2.6,3.7
-1.7,2.7,3.8
-1.8,2.8,3.9
-1.9,2.9,4.0
-2.0,3.0,4.1
-2.1,3.1,4.2"""
-
+        # Используем одностолбцовый формат (по сути одна колонка со строками с запятыми)
+        csv_content = (
+            "current_R,current_S,current_T\n"
+            "1.1,2.2,3.3\n"
+            "1.2,2.3,3.4\n"
+            "1.3,,3.5\n"
+            "1.4,2.5,\n"
+            ",2.6,3.7\n"
+            "1.7,2.7,3.8\n"
+            "1.8,2.8,3.9\n"
+            "1.9,2.9,4.0\n"
+            "2.0,3.0,4.1\n"
+            "2.1,3.1,4.2"
+        )
         csv_file.write_text(csv_content)
         return csv_file
 
@@ -325,7 +335,7 @@ class TestCSVLoader:
     async def test_phase_status_missing(self, tmp_path, csv_loader, mock_session):
         """Проверка вычисления phase_status при полностью пустой фазе."""
         csv_file = tmp_path / "missing_phase.csv"
-        # Фаза S полностью пустая
+        # Фаза S полностью пустая (одностолбцовый режим)
         csv_file.write_text("current_R,current_S,current_T\n1.0,,3.0\n2.0,,4.0\n")
         # Мокаем сессию внутри load_csv_file
         with patch('src.data_processing.csv_loader.get_async_session') as mock_get_session:
@@ -340,6 +350,14 @@ class TestCSVLoader:
         assert stats_dict['phase_status']['S'] in ('missing','ok')  # В зависимости от логики NaN подсчета
         # Проверим что nan_values для S равны количеству обработанных строк
         assert stats_dict['nan_values']['S'] == stats.processed_rows
+    
+    def test_parse_csv_row_single_value(self):
+        """Строка только с одним значением"""
+        row_data = "1.23"
+        values, mask = parse_csv_row(row_data)
+        assert values[0] == 1.23
+        assert np.isnan(values[1]) and np.isnan(values[2])
+        assert mask == [False, True, True]
 
 
 @pytest.mark.integration

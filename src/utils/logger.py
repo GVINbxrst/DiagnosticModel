@@ -237,4 +237,4 @@ if __name__ == "__main__":
     s_logger.info("Тестирование структурированного логгера", key="value", number=42)
     s_logger.warning("Структурированное предупреждение", module="test", action="log_test")
 
-    print("Тест логирования завершен")
+    logger.info("Тест логирования завершен")

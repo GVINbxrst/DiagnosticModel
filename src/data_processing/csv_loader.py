@@ -174,55 +174,60 @@ def calculate_file_hash(file_path: Path) -> str:
 
 
 def parse_csv_header(header_line: str) -> List[str]:
-    # Парсинг заголовка CSV (3 фазы)
-    # Убираем лишние пробелы и разбиваем по запятым
-    phases = [phase.strip() for phase in header_line.strip().split(',')]
-
-    # Проверяем количество фаз
-    if len(phases) != 3:
-        raise InvalidCSVFormatError(
-            f"Ожидается 3 фазы, найдено {len(phases)}: {phases}"
-        )
-
-    # Проверяем формат названий фаз
+    # Парсинг заголовка CSV (1..3 фазы) с автодополнением отсутствующих
+    phases_raw = [phase.strip() for phase in header_line.strip().split(',') if phase.strip()]
+    if len(phases_raw) == 0:
+        raise InvalidCSVFormatError("Заголовок пустой")
+    if len(phases_raw) > 3:
+        raise InvalidCSVFormatError(f"Слишком много фаз ({len(phases_raw)}): {phases_raw}")
     expected_patterns = ['current_R', 'current_S', 'current_T']
-    for i, (expected, actual) in enumerate(zip(expected_patterns, phases)):
-        if not actual.startswith('current_'):
-            logger.warning(f"Нестандартное название фазы {i}: '{actual}', "
-                          f"ожидается '{expected}'")
-
-    logger.info(f"Обнаружены фазы: {phases}")
+    # Оставляем только допустимые имена/или те что начинаются с current_
+    phases: List[str] = []
+    for i, name in enumerate(phases_raw):
+        if not name.startswith('current_'):
+            logger.warning(f"Нестандартное название фазы {i}: '{name}'")
+        phases.append(name)
+    # Автодополняем недостающие фазы в ожидаемом порядке
+    for exp in expected_patterns:
+        base = exp.split('_',1)[1]
+        # Уже есть такая? (точное совпадение)
+        if exp not in phases:
+            # Проверяем есть ли другая фаза с тем же суффиксом (например current_R vs R)
+            found_same = any(p.endswith(base) for p in phases)
+            if not found_same and len(phases) < 3:
+                phases.append(exp)
+    # Если после дополнения всё ещё <3 — дозаполняем в порядке expected
+    for exp in expected_patterns:
+        if len(phases) >= 3:
+            break
+        if exp not in phases:
+            phases.append(exp)
+    logger.info(f"Обнаружены/нормализованы фазы: {phases}")
     return phases
 
 
 def parse_csv_row(row_data: str, phase_count: int = 3) -> Tuple[List[float], List[bool]]:
-    # Парсинг строки CSV
-    # Разбиваем строку по запятым
-    values_str = [val.strip() for val in row_data.split(',')]
-
-    # Дополняем до нужного количества фаз, если их меньше
-    while len(values_str) < phase_count:
-        values_str.append('')
-
-    # Берем только первые phase_count значений
-    values_str = values_str[:phase_count]
-
-    values = []
-    nan_mask = []
-
-    for val_str in values_str:
-        if val_str == '' or val_str.lower() in ['nan', 'null', 'none']:
+    # Парсинг строки CSV с дополняющими NaN
+    parts = [val.strip() for val in row_data.split(',')]
+    # Если значений меньше требуемого — наполняем пустыми
+    if len(parts) < phase_count:
+        parts += [''] * (phase_count - len(parts))
+    if len(parts) > phase_count:
+        parts = parts[:phase_count]
+    values: List[float] = []
+    nan_mask: List[bool] = []
+    for val_str in parts:
+        if val_str == '' or val_str.lower() in ('nan','null','none'):
             values.append(np.nan)
             nan_mask.append(True)
         else:
             try:
                 values.append(float(val_str))
                 nan_mask.append(False)
-            except ValueError:
-                logger.warning(f"Некорректное значение: '{val_str}', заменяем на NaN")
+            except Exception:
+                logger.warning(f"Некорректное значение: '{val_str}', -> NaN")
                 values.append(np.nan)
                 nan_mask.append(True)
-
     return values, nan_mask
 
 
@@ -745,7 +750,7 @@ if __name__ == "__main__":
                 equipment_id=equipment_id,
                 sample_rate=args.sample_rate
             )
-            print(f"Файл обработан: {stats.to_dict()}")
+            logger.info(f"Файл обработан: {stats.to_dict()}")
 
         elif path.is_dir():
             # Загружаем все файлы из директории
@@ -755,13 +760,13 @@ if __name__ == "__main__":
                 sample_rate=args.sample_rate
             )
 
-            print(f"Обработано файлов: {len(results)}")
+            logger.info(f"Обработано файлов: {len(results)}")
             for filename, stats in results.items():
                 if stats:
-                    print(f"  {filename}: {stats.processed_rows:,} строк")
+                    logger.info(f"  {filename}: {stats.processed_rows:,} строк")
                 else:
-                    print(f"  {filename}: ОШИБКА")
+                    logger.error(f"  {filename}: ОШИБКА")
         else:
-            print(f"Путь не найден: {path}")
+            logger.error(f"Путь не найден: {path}")
 
     asyncio.run(main())

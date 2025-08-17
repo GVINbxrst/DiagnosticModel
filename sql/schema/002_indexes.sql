@@ -22,6 +22,10 @@ CREATE INDEX CONCURRENTLY idx_raw_signals_unprocessed
     ON raw_signals USING BTREE (processed, created_at)
     WHERE processed = false;
 
+-- Индекс по статусу обработки pipeline
+CREATE INDEX CONCURRENTLY idx_raw_signals_processing_status
+    ON raw_signals USING BTREE (processing_status, created_at DESC);
+
 -- Индекс по хешу файла (для дедупликации)
 CREATE INDEX CONCURRENTLY idx_raw_signals_file_hash
     ON raw_signals USING BTREE (file_hash)
@@ -101,6 +105,20 @@ CREATE INDEX CONCURRENTLY idx_predictions_defect_type
 CREATE INDEX CONCURRENTLY idx_predictions_high_probability
     ON predictions USING BTREE (probability DESC)
     WHERE probability > 0.7;
+
+-- Индекс по оборудованию (частые фильтры)
+CREATE INDEX CONCURRENTLY idx_predictions_equipment
+    ON predictions USING BTREE (equipment_id, created_at DESC);
+
+-- Индекс по флагу аномалии
+CREATE INDEX CONCURRENTLY idx_predictions_anomaly_detected
+    ON predictions USING BTREE (anomaly_detected, confidence DESC, created_at DESC)
+    WHERE anomaly_detected = true;
+
+-- Индекс по confidence (общие фильтры)
+CREATE INDEX CONCURRENTLY idx_predictions_confidence
+    ON predictions USING BTREE (confidence DESC)
+    WHERE confidence > 0.0;
 
 -- Индекс по критичности
 CREATE INDEX CONCURRENTLY idx_predictions_severity

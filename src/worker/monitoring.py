@@ -288,33 +288,7 @@ def create_worker_metrics_server(port: int = 8002):
         logger.error(f"❌ Ошибка запуска HTTP сервера метрик: {e}")
 
 
-def get_worker_metrics_endpoint():
-    # Flask endpoint для метрик
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-    from flask import Flask, Response
-
-    app = Flask(__name__)
-
-    @app.route('/metrics')
-    def metrics():
-    # Prometheus метрики
-        try:
-            metrics_data = generate_latest()
-            return Response(metrics_data, mimetype=CONTENT_TYPE_LATEST)
-        except Exception as e:
-            logger.error(f"Ошибка при получении метрик Worker: {e}")
-            return Response("Error getting metrics", status=500)
-
-    @app.route('/health')
-    def health():
-        # Health check
-        return {
-            "status": "healthy",
-            "timestamp": time.time(),
-            "service": "diagmod-worker"
-        }
-
-    return app
+## Удалён Flask endpoint (избыточная зависимость). Используйте create_worker_metrics_server/start_http_server.
 
 
 # Глобальный экземпляр коллектора

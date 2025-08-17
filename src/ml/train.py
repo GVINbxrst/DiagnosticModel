@@ -887,20 +887,26 @@ if __name__ == "__main__":
                 output_dir=args.output_dir
             )
 
-            print(f"\n✓ Обучение завершено успешно!")
-            print(f"  - Версия модели: {results['model_version']}")
-            print(f"  - Isolation Forest: {results['isolation_forest']['n_anomalies']} аномалий "
-                  f"({results['isolation_forest']['anomaly_ratio']:.1%})")
-            print(f"  - DBSCAN: {results['dbscan']['n_clusters']} кластеров, "
-                  f"{results['dbscan']['n_anomalies']} аномалий")
-            print(f"  - PCA: объяснено {results['pca']['total_variance_explained']:.1%} дисперсии")
+            logger.info("Обучение завершено успешно")
+            logger.info(f"Версия модели: {results['model_version']}")
+            logger.info(
+                f"Isolation Forest: {results['isolation_forest']['n_anomalies']} аномалий "
+                f"({results['isolation_forest']['anomaly_ratio']:.1%})"
+            )
+            logger.info(
+                f"DBSCAN: {results['dbscan']['n_clusters']} кластеров, "
+                f"{results['dbscan']['n_anomalies']} аномалий"
+            )
+            logger.info(
+                f"PCA: объяснено {results['pca']['total_variance_explained']:.1%} дисперсии"
+            )
 
             if 'visualizations' in results:
-                print(f"  - Создано визуализаций: {len(results['visualizations'])}")
+                logger.info(f"Создано визуализаций: {len(results['visualizations'])}")
 
         except Exception as e:
             logger.error(f"Ошибка обучения моделей: {e}")
-            print(f"✗ Ошибка: {e}")
+            # Вывод в stdout убираем: достаточно логера
             return False
 
         return True
